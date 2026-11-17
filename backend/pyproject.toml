@@ -1,0 +1,14 @@
+[project]
+name = "recovery-voice-agent"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "pipecat-ai[websocket,deepgram,google,silero,webrtc]",
+  "fastapi",
+  "uvicorn[standard]",
+  "plivo",
+  "pydantic-settings",
+  "python-dotenv",
+  "httpx",
+  "pytest",
+]
