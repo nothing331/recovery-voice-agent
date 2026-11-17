@@ -3,10 +3,18 @@ import asyncio
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-from app import telephony
+from app import api, telephony
+
+try:
+    from pipecat_ai_prebuilt.frontend import PipecatPrebuiltUI
+except ImportError:  # pragma: no cover
+    PipecatPrebuiltUI = None
 
 app = FastAPI(title="Autopay Recovery Voice Agent")
 app.include_router(telephony.router)
+app.include_router(api.router)
+if PipecatPrebuiltUI is not None:
+    app.mount("/client", PipecatPrebuiltUI)
 
 
 @app.get("/health")

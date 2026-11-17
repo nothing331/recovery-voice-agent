@@ -13,6 +13,7 @@ from pipecat.transports.websocket.fastapi import (
     FastAPIWebsocketTransport,
 )
 
+from app import calls, store
 from app.bot import run_bot
 from app.config import settings
 
@@ -60,15 +61,23 @@ async def plivo_answer(call_id: int | None = None):
 @router.post("/plivo/hangup")
 async def plivo_hangup(request: Request, call_id: int | None = None):
     form = dict(await request.form())
-    logger.info(f"plivo hangup call_id={call_id} {form.get('CallStatus')} {form.get('HangupCauseName')}")
+    status = str(form.get("CallStatus", "")).lower()
+    logger.info(f"plivo hangup call_id={call_id} {status} {form.get('HangupCauseName')}")
+    if call_id and status in calls.UNANSWERED:
+        calls.mark_unanswered(store.get_conn(), call_id)
     return Response(status_code=204)
 
 
 @router.post("/plivo/machine")
 async def plivo_machine(request: Request, call_id: int | None = None):
-    # Stub: Plivo posts machine-detection results here (Machine=true/false).
     form = dict(await request.form())
     logger.info(f"plivo machine detection call_id={call_id} {form}")
+    if call_id and str(form.get("Machine", "")).lower() == "true":
+        hook = store.voicemail_hooks.get(call_id)
+        if hook:  # bot already running: leave the voicemail line now
+            await hook()
+        else:  # detection finished before the stream connected
+            store.voicemail_calls.add(call_id)
     return Response(status_code=204)
 
 

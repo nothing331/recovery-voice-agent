@@ -11,4 +11,5 @@ dependencies = [
   "python-dotenv",
   "httpx",
   "pytest",
+  "pipecat-ai-prebuilt>=1.4.0",
 ]
