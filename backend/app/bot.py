@@ -26,6 +26,7 @@ from pipecat.processors.aggregators.llm_response_universal import (
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.deepgram.tts import DeepgramTTSService
 from pipecat.services.google.llm import GoogleLLMService
+from pipecat.services.openrouter.llm import OpenRouterLLMService
 
 from app import calls, store
 from app.config import settings
@@ -40,6 +41,19 @@ HELLO_PROMPT = (
     "Keep replies to one short sentence. This is a connectivity test."
 )
 
+
+
+def _build_llm(system_prompt: str):
+    """LLM factory; both services take the prompt via system_instruction and use the same tool handlers."""
+    if settings.llm_provider == "google":
+        return GoogleLLMService(
+            api_key=settings.google_api_key,
+            settings=GoogleLLMService.Settings(model=settings.gemini_model, system_instruction=system_prompt),
+        )
+    return OpenRouterLLMService(
+        api_key=settings.openrouter_api_key,
+        settings=OpenRouterLLMService.Settings(model=settings.openrouter_model, system_instruction=system_prompt),
+    )
 
 
 def _tools_schema() -> ToolsSchema:
@@ -90,10 +104,7 @@ async def run_bot(transport, call_id: int | None, sample_rate: int = 8000) -> No
         api_key=settings.deepgram_api_key,
         settings=DeepgramSTTService.Settings(model="nova-3", language="en-IN"),
     )
-    llm = GoogleLLMService(
-        api_key=settings.google_api_key,
-        settings=GoogleLLMService.Settings(model=settings.gemini_model, system_instruction=system_prompt),
-    )
+    llm = _build_llm(system_prompt)
     tts = DeepgramTTSService(
         api_key=settings.deepgram_api_key,
         encoding="linear16",

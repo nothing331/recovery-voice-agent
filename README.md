@@ -45,7 +45,7 @@ It runs against 10 fictional customer records. Payments are faked, so every demo
 
 1. **Plivo:** sign up for a trial account. Under **Voice → Geo Permissions**, enable **India**. Under **Phone Numbers → Sandbox Numbers**, add each destination number and confirm it with the OTP. Trial calls only reach verified numbers. Note your Auth ID, Auth Token and a Plivo number to call from.
 2. **Deepgram:** create a key at console.deepgram.com. New accounts include $200 of free credit.
-3. **Gemini:** create a key at aistudio.google.com.
+3. **LLM:** default is OpenRouter (`LLM_PROVIDER=openrouter`): create a key at openrouter.ai and set `OPENROUTER_API_KEY`; `OPENROUTER_MODEL` defaults to `google/gemini-2.5-flash`. To use Gemini directly, set `LLM_PROVIDER=google` and `GOOGLE_API_KEY` (aistudio.google.com).
 
 **Caller ID:** Plivo trial calls come from a foreign number, so the recipient's phone shows **"International call"**. This is expected for the demo. Warn anyone receiving a call.
 
@@ -54,7 +54,7 @@ It runs against 10 fictional customer records. Payments are faked, so every demo
 ```bash
 cp backend/.env.example backend/.env
 # fill in PLIVO_AUTH_ID, PLIVO_AUTH_TOKEN, PLIVO_FROM_NUMBER,
-# VERIFIED_NUMBERS, DEFAULT_TO_NUMBER, DEEPGRAM_API_KEY, GOOGLE_API_KEY
+# VERIFIED_NUMBERS, DEFAULT_TO_NUMBER, DEEPGRAM_API_KEY, OPENROUTER_API_KEY
 ```
 
 ### 3. Expose the backend (needed for calls)
