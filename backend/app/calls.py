@@ -31,6 +31,20 @@ def has_active_call(conn, customer_id: str) -> bool:
     return row is not None
 
 
+def derive_outcome(conn, call_id: int) -> str | None:
+    """Financial outcome of a call, derived from its payment_attempts rows."""
+    rows = conn.execute("SELECT kind, result FROM payment_attempts WHERE call_id=?", (call_id,)).fetchall()
+    ok = {r["kind"] for r in rows if r["result"] == "success"}
+    sched = any(r["kind"] == "scheduled" for r in rows)
+    if "retry" in ok:
+        return "paid"
+    if "partial" in ok and sched:
+        return "partial_paid_and_scheduled"
+    if sched:
+        return "scheduled"
+    return None
+
+
 def extract_transcript(messages: list) -> list[dict]:
     """Agent/customer turns only: drops system, tool and empty messages."""
     out = []
@@ -51,6 +65,13 @@ def extract_transcript(messages: list) -> list[dict]:
 def finalize_call(conn, call_id: int, messages: list, latency: dict | None = None) -> None:
     """Idempotent: save transcript, default the outcome to incomplete, mark completed."""
     transcript = extract_transcript(messages)
+    row = conn.execute("SELECT outcome FROM calls WHERE id=?", (call_id,)).fetchone()
+    if row is not None and row["outcome"] is None:
+        derived = derive_outcome(conn, call_id)
+        if derived is None:
+            flagged = conn.execute("SELECT 1 FROM attention_items WHERE call_id=? LIMIT 1", (call_id,)).fetchone()
+            derived = "escalated" if flagged else "incomplete"
+        conn.execute("UPDATE calls SET outcome=? WHERE id=?", (derived, call_id))
     conn.execute(
         "UPDATE calls SET transcript_json=?, status='completed', "
         "outcome=COALESCE(outcome,'incomplete'), ended_at=COALESCE(ended_at,?), "

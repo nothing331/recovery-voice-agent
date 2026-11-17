@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS customers(
 CREATE TABLE IF NOT EXISTS calls(
   id INTEGER PRIMARY KEY AUTOINCREMENT, customer_id TEXT REFERENCES customers(id), to_number TEXT,
   channel TEXT, plivo_uuid TEXT, status TEXT, started_at TEXT, ended_at TEXT, outcome TEXT,
-  identity_result TEXT, promise_amount INTEGER, promise_date TEXT, summary TEXT, transcript_json TEXT, latency_json TEXT);
+  identity_result TEXT, promise_amount INTEGER, promise_date TEXT, summary TEXT, transcript_json TEXT, latency_json TEXT, disposition TEXT);
 CREATE TABLE IF NOT EXISTS payment_attempts(
   id INTEGER PRIMARY KEY AUTOINCREMENT, customer_id TEXT REFERENCES customers(id), call_id INTEGER,
   kind TEXT, amount INTEGER, date TEXT, result TEXT, created_at TEXT);
@@ -30,4 +30,6 @@ def init_schema(conn: sqlite3.Connection) -> None:
     cols = {r[1] for r in conn.execute("PRAGMA table_info(calls)")}
     if "latency_json" not in cols:  # migrate an existing recovery.db
         conn.execute("ALTER TABLE calls ADD COLUMN latency_json TEXT")
+    if "disposition" not in cols:
+        conn.execute("ALTER TABLE calls ADD COLUMN disposition TEXT")
     conn.commit()

@@ -1,11 +1,15 @@
 from datetime import date, datetime, timezone
 
-from .payments import DebitsBlocked, FakePaymentProvider
+from contextlib import contextmanager
+
+from .calls import derive_outcome
+from .payments import DebitsBlocked, FakePaymentProvider, ledger
 from .rules import MAX_SCHEDULE_DAYS, validate_schedule_date
 from datetime import timedelta
 
 FLAG_REASONS = ["identity_denied", "do_not_call_request", "needs_card_update", "fraud", "dispute",
                 "wants_human", "hardship", "abuse", "extension_over_5_days"]
+FINANCIAL = ("paid", "scheduled", "partial_paid_and_scheduled")
 OUTCOMES = ["paid", "scheduled", "partial_paid_and_scheduled", "escalated", "voicemail", "no_answer", "incomplete"]
 
 REASON_PLAIN = {
@@ -32,14 +36,44 @@ class CallSession:
     def _customer(self):
         return self.conn.execute("SELECT * FROM customers WHERE id=?", (self.customer_id,)).fetchone()
 
-    def _set_status(self, status):
+    def _set_status(self, status, commit=True):
         self.conn.execute("UPDATE customers SET status=? WHERE id=?", (status, self.customer_id))
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
 
-    def _promise(self, amount, date_str):
+    def _promise(self, amount, date_str, commit=True):
         self.conn.execute("UPDATE calls SET promise_amount=?, promise_date=? WHERE id=?",
                           (amount, date_str, self.call_id))
+        if commit:
+            self.conn.commit()
+
+    @contextmanager
+    def _txn(self):
+        """Single SQLite transaction: COMMIT on success, ROLLBACK if anything raises."""
         self.conn.commit()
+        self.conn.execute("BEGIN")
+        try:
+            yield
+        except BaseException:
+            self.conn.rollback()
+            raise
+        self.conn.commit()
+
+    def _remaining(self):
+        charged, sched, _ = ledger(self.conn, self.customer_id)
+        return self._customer()["amount_due"] - charged - sched
+
+    def _resolved(self):
+        """Backend gate: one payment decision per case."""
+        _, _, has_schedule = ledger(self.conn, self.customer_id)
+        if self._customer()["status"] == "paid" or has_schedule or self._remaining() <= 0:
+            return {"error": "already_resolved",
+                    "message": "This account already has a payment decision (paid or a debit scheduled). Do not charge or schedule again; confirm the existing arrangement and end the call, or flag_for_human if the customer wants a change."}
+        return None
+
+    @staticmethod
+    def _failed(e):
+        return {"error": "payment_error", "message": f"The payment could not be recorded ({type(e).__name__}). Nothing was charged. Apologise and flag_for_human."}
 
     def _locked(self):
         if not self.identity_confirmed:
@@ -82,15 +116,21 @@ class CallSession:
         if self.retried:
             return {"error": "already_retried",
                     "message": "A retry was already made on this call. Offer to schedule the debit within 5 days instead."}
+        if (e := self._resolved()):
+            return e
         self.retried = True
         try:
-            ok, reason = self.payments.retry(self.customer_id, self.call_id)
+            with self._txn():
+                ok, reason = self.payments.retry(self.customer_id, self.call_id, commit=False)
+                c = self._customer()
+                if ok:
+                    self._set_status("paid", commit=False)
+                    self._promise(c["amount_due"], self.today.isoformat(), commit=False)
         except DebitsBlocked:
             return self._locked() or {"error": "debits_blocked"}
-        c = self._customer()
+        except Exception as e:
+            return self._failed(e)
         if ok:
-            self._set_status("paid")
-            self._promise(c["amount_due"], self.today.isoformat())
             return {"success": True, "amount": c["amount_due"],
                     "message": "Payment went through. Confirm it to the customer, thank them and end the call."}
         return {"success": False, "reason": reason,
@@ -99,41 +139,54 @@ class CallSession:
     def schedule_debit(self, date: str, amount: int | None = None) -> dict:
         if (e := self._locked()):
             return e
-        c = self._customer()
+        if (e := self._resolved()):
+            return e
+        remaining = self._remaining()
         if amount is None:
-            amount = c["amount_due"]
-        if not isinstance(amount, int) or isinstance(amount, bool) or not 0 < amount <= c["amount_due"]:
+            amount = remaining
+        if not isinstance(amount, int) or isinstance(amount, bool) or not 0 < amount <= remaining:
             return {"error": "invalid_amount",
-                    "message": f"Amount must be between 1 and {c['amount_due']} rupees."}
+                    "message": f"Amount must be between 1 and {remaining} rupees."}
         if (e := self._date_error(date)):
             return e
-        self.payments.schedule(self.customer_id, self.call_id, amount, date)
-        self._set_status("scheduled")
-        self._promise(amount, date)
+        try:
+            with self._txn():
+                self.payments.schedule(self.customer_id, self.call_id, amount, date, commit=False)
+                self._set_status("scheduled", commit=False)
+                self._promise(amount, date, commit=False)
+        except DebitsBlocked:
+            return self._locked() or {"error": "debits_blocked"}
+        except Exception as e:
+            return self._failed(e)
         return {"success": True, "amount": amount, "date": date,
                 "message": f"Debit of {amount} rupees is scheduled for {date}. Confirm this with the customer and end the call."}
 
     def take_partial_payment(self, amount_now: int, rest_date: str) -> dict:
         if (e := self._locked()):
             return e
-        c = self._customer()
-        due = c["amount_due"]
+        if (e := self._resolved()):
+            return e
+        due = self._remaining()
         if not isinstance(amount_now, int) or isinstance(amount_now, bool) or not 0 < amount_now < due:
             return {"error": "invalid_amount",
                     "message": f"Partial amount must be more than 0 and less than {due} rupees. For the full amount use retry_debit or schedule_debit."}
         if (e := self._date_error(rest_date)):
             return e
+        rest = due - amount_now
         try:
-            ok, reason = self.payments.charge_partial(self.customer_id, self.call_id, amount_now)
+            with self._txn():
+                ok, reason = self.payments.charge_partial(self.customer_id, self.call_id, amount_now, commit=False)
+                if ok:
+                    self.payments.schedule(self.customer_id, self.call_id, rest, rest_date, commit=False)
+                    self._set_status("partial_scheduled", commit=False)
+                    self._promise(rest, rest_date, commit=False)
         except DebitsBlocked:
             return self._locked() or {"error": "debits_blocked"}
+        except Exception as e:
+            return self._failed(e)
         if not ok:
             return {"success": False, "reason": reason,
                     "message": f"The partial charge failed ({REASON_PLAIN.get(reason, reason)}). Offer to schedule the full amount within 5 days instead."}
-        rest = due - amount_now
-        self.payments.schedule(self.customer_id, self.call_id, rest, rest_date)
-        self._set_status("partial_scheduled")
-        self._promise(rest, rest_date)
         return {"success": True, "paid_now": amount_now, "remaining": rest, "rest_date": rest_date,
                 "message": f"Charged {amount_now} rupees now; remaining {rest} rupees scheduled for {rest_date}. Confirm both with the customer and end the call."}
 
@@ -158,8 +211,15 @@ class CallSession:
     def end_call(self, outcome: str, summary: str) -> dict:
         if outcome not in OUTCOMES:
             return {"error": "invalid_outcome", "message": f"Outcome must be one of: {', '.join(OUTCOMES)}."}
-        self.conn.execute("UPDATE calls SET outcome=?, summary=?, ended_at=? WHERE id=?",
-                          (outcome, summary, _now(), self.call_id))
+        derived = derive_outcome(self.conn, self.call_id)
+        if outcome in FINANCIAL and outcome != derived:
+            if derived:
+                msg = f"Ledger shows {derived}. Use {derived}."
+            else:
+                msg = "Ledger shows no payment. Use escalated, voicemail, no_answer or incomplete."
+            return {"error": "outcome_mismatch", "message": msg}
+        self.conn.execute("UPDATE calls SET outcome=?, disposition=?, summary=?, ended_at=? WHERE id=?",
+                          (derived or outcome, outcome, summary, _now(), self.call_id))
         self.conn.commit()
         return {"success": True}
 
