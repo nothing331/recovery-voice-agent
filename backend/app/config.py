@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     plivo_auth_token: str = ""
     plivo_from_number: str = ""
     public_base_url: str = ""
+    plivo_verify_signatures: bool = True
     default_to_number: str = ""
     verified_numbers: Annotated[list[str], NoDecode] = []
     deepgram_api_key: str = ""

@@ -18,6 +18,7 @@ def client(monkeypatch):
     store.set_conn(conn)
     monkeypatch.setattr(settings, "verified_numbers", [NUM])
     monkeypatch.setattr(settings, "default_to_number", NUM)
+    monkeypatch.setattr(settings, "plivo_verify_signatures", False)
     placed = []
     monkeypatch.setattr(telephony, "place_call", lambda to, cid: placed.append((to, cid)) or "uuid-1")
     c = TestClient(app)
@@ -87,9 +88,9 @@ def test_resolve_attention(client):
 
 def test_browser_session_url(client):
     r = client.post("/api/browser-session", json={"customer_id": "c1"})
-    assert r.status_code == 200 and r.json()["url"].endswith("/client/")
+    assert r.status_code == 200 and "/client/?sid=" in r.json()["url"]
     row = client.conn.execute("SELECT channel FROM calls").fetchone()
-    assert row["channel"] == "browser" and store.pending_browser_call
+    assert row["channel"] == "browser" and store.browser_tokens
 
 
 def test_hangup_unanswered_sets_no_answer(client):
@@ -109,8 +110,9 @@ def test_hangup_does_not_override_outcome(client):
 
 def test_machine_marks_voicemail(client):
     store.voicemail_calls.clear()
-    client.post("/plivo/machine?call_id=7", data={"Machine": "true"})
-    assert 7 in store.voicemail_calls
+    cid = calls.create_call(client.conn, "c1", NUM, "phone")
+    client.post(f"/plivo/machine?call_id={cid}", data={"Machine": "true"})
+    assert cid in store.voicemail_calls
     store.voicemail_calls.clear()
 
 

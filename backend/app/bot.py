@@ -10,11 +10,14 @@ from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.adapters.llm.schemas.function_schema import FunctionSchema
 from pipecat.adapters.llm.schemas.tools_schema import ToolsSchema
 from pipecat.frames.frames import (
+    BotStartedSpeakingFrame,
+    BotStoppedSpeakingFrame,
     EndWorkerFrame,
     FunctionCallResultProperties,
     LLMRunFrame,
     TTSSpeakFrame,
 )
+from pipecat.observers.base_observer import BaseObserver, FramePushed
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.workers.runner import WorkerRunner
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
@@ -83,6 +86,20 @@ def _voicemail_text() -> str:
     )
 
 
+class _BotStoppedObserver(BaseObserver):
+    """Reports bot speech boundaries (first push only)."""
+
+    def __init__(self, on_started, on_stopped):
+        super().__init__(observe_every_push=False)
+        self._on_started, self._on_stopped = on_started, on_stopped
+
+    async def on_push_frame(self, data: FramePushed):
+        if isinstance(data.frame, BotStartedSpeakingFrame):
+            await self._on_started()
+        elif isinstance(data.frame, BotStoppedSpeakingFrame):
+            await self._on_stopped()
+
+
 async def run_bot(transport, call_id: int | None, sample_rate: int = 8000) -> None:
     conn = store.get_conn()
     row = None
@@ -122,6 +139,19 @@ async def run_bot(transport, call_id: int | None, sample_rate: int = 8000) -> No
         [transport.input(), stt, user_agg, llm, tts, transport.output(), assistant_agg]
     )
     latency = LatencyCollector(call_id)
+    voicemail_state = {"started": False, "speaking": False, "done": False}
+
+    async def on_bot_started():
+        if voicemail_state["started"]:  # speech that began after the voicemail was queued
+            voicemail_state["speaking"] = True
+
+    async def on_bot_stopped():
+        # Record 'voicemail' only once the message has actually played.
+        if voicemail_state["speaking"] and not voicemail_state["done"] and session:
+            voicemail_state["done"] = True
+            session.end_call("voicemail", "Answering machine detected; left a short message with no details.")
+            await worker.queue_frames([EndWorkerFrame(reason="voicemail")])
+
     worker = PipelineWorker(
         pipeline,
         params=PipelineParams(
@@ -130,7 +160,7 @@ async def run_bot(transport, call_id: int | None, sample_rate: int = 8000) -> No
             enable_metrics=True,
             enable_usage_metrics=True,
         ),
-        observers=latency.observers,
+        observers=[*latency.observers, _BotStoppedObserver(on_bot_started, on_bot_stopped)],
     )
 
     if session:
@@ -164,9 +194,11 @@ async def run_bot(transport, call_id: int | None, sample_rate: int = 8000) -> No
             llm.register_function(t["name"], make_handler(t["name"]))
 
     async def leave_voicemail():
+        if voicemail_state["started"]:  # repeated detection callbacks
+            return
+        voicemail_state["started"] = True
         logger.info(f"call {call_id}: answering machine, leaving voicemail")
-        session.end_call("voicemail", "Answering machine detected; left a short message with no details.")
-        await worker.queue_frames([TTSSpeakFrame(_voicemail_text()), EndWorkerFrame(reason="voicemail")])
+        await worker.queue_frames([TTSSpeakFrame(_voicemail_text())])
 
     async def safety_timeout():
         await asyncio.sleep(MAX_CALL_SECONDS)

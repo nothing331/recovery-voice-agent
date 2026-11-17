@@ -66,6 +66,8 @@ cloudflared tunnel --url http://localhost:8000
 
 Copy the `https://….trycloudflare.com` URL into `PUBLIC_BASE_URL` in `backend/.env`, then restart the backend. Plivo fetches call instructions and streams audio through this URL, so it must stay running during calls. The URL changes each time the tunnel restarts.
 
+**Security:** requests that arrive through the tunnel (Cloudflare headers, or a non-localhost `Host`) can only reach `/plivo/*`; the dashboard, transcripts, dialing and reset are local-only (404 via the tunnel). Plivo callbacks must carry a valid `X-Plivo-Signature-V3` (computed against `PUBLIC_BASE_URL`; set `PLIVO_VERIFY_SIGNATURES=false` to disable if it misbehaves), and the media WebSocket needs a per-call token. There is no `/dev/test-call` endpoint; calls go through the dashboard, which enforces the verified-number list.
+
 ### 4. Run
 
 ```bash
@@ -78,7 +80,7 @@ cd frontend && npm install && npm run dev
 
 Open the dashboard at the Vite URL (default http://localhost:5173).
 
-**Browser fallback:** if the phone path fails, click **Talk in browser** on a customer row, then open http://localhost:8000/client/ and click **Connect**. This runs the same bot over WebRTC, with no phone needed.
+**Browser fallback:** if the phone path fails, click **Talk in browser** on a customer row, a browser tab opens at `/client/?sid=…` (single-use, valid 5 minutes); click **Connect** there. Each click creates its own session bound to that customer's call, so multiple tabs do not mix up cases. Open the dashboard locally (not via the tunnel). This runs the same bot over WebRTC, with no phone needed.
 
 **Tests:** `cd backend && uv run pytest -q`
 

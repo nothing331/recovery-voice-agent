@@ -2,7 +2,7 @@
 
 import asyncio
 import json
-import uuid
+from urllib.parse import parse_qs, urlparse
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from loguru import logger
@@ -102,8 +102,9 @@ class BrowserSession(BaseModel):
 async def browser_session(body: BrowserSession, request: Request):
     conn = store.get_conn()
     _check_callable(conn, body.customer_id)
-    store.pending_browser_call = calls.create_call(conn, body.customer_id, "browser", "browser")
-    return {"url": str(request.base_url).rstrip("/") + "/client/"}
+    call_id = calls.create_call(conn, body.customer_id, "browser", "browser")
+    token = store.new_browser_token(call_id)
+    return {"url": str(request.base_url).rstrip("/") + f"/client/?sid={token}"}
 
 
 _CALL_COLS = ("c.id, c.customer_id, cu.name AS customer_name, c.to_number, c.channel, c.status, "
@@ -190,7 +191,7 @@ async def resolve_attention(item_id: int):
 async def demo_reset():
     seed.reset(store.get_conn())
     store.voicemail_calls.clear()
-    store.pending_browser_call = None
+    store.clear_browser_state()
     return {"ok": True}
 
 
@@ -202,16 +203,28 @@ async def status():
 
 
 @router.post("/start")
-async def start_session():
-    return {"sessionId": str(uuid.uuid4())}
+async def start_session(request: Request):
+    # The prebuilt client POSTs a fixed "/start"; the per-tab token rides on the page URL
+    # (/client/?sid=...), which the browser sends as the Referer of that same-origin fetch.
+    ref = request.headers.get("referer", "")
+    token = (parse_qs(urlparse(ref).query).get("sid") or [None])[0]
+    session_id = store.start_browser_session(token)
+    if session_id is None:
+        raise HTTPException(403, "Unknown or expired browser session. Click 'Talk in browser' again.")
+    return {"sessionId": session_id}
 
 
-async def _handle_offer(req: SmallWebRTCRequest):
+async def _handle_offer(session_id: str, req: SmallWebRTCRequest):
+    sess = store.get_browser_session(session_id)
+    if sess is None:
+        raise HTTPException(404, "Unknown or expired browser session")
+    if not req.pc_id:  # a new connection; renegotiation carries a pc_id
+        if sess["used"]:
+            raise HTTPException(409, "Browser session already used")
+        sess["used"] = True
+    call_id = sess["call_id"]
+
     async def on_connection(connection: SmallWebRTCConnection):
-        call_id, store.pending_browser_call = store.pending_browser_call, None
-        if call_id is None:
-            logger.error("browser offer with no pending browser call; click 'Talk in browser' first")
-            return
         transport = SmallWebRTCTransport(
             webrtc_connection=connection,
             params=TransportParams(audio_in_enabled=True, audio_out_enabled=True),
@@ -223,16 +236,10 @@ async def _handle_offer(req: SmallWebRTCRequest):
     return await _webrtc.handle_web_request(req, on_connection)
 
 
-@router.post("/api/offer")
-async def offer(request: Request):
-    data = await request.json()
-    return await _handle_offer(SmallWebRTCRequest.from_dict(data))
-
-
 @router.post("/sessions/{session_id}/api/offer")
 async def session_offer(session_id: str, request: Request):
     data = await request.json()
-    return await _handle_offer(SmallWebRTCRequest.from_dict(data))
+    return await _handle_offer(session_id, SmallWebRTCRequest.from_dict(data))
 
 
 async def _patch(request: Request):
@@ -246,8 +253,9 @@ async def _patch(request: Request):
 
 
 async def _patch_session(session_id: str, request: Request):
+    if store.get_browser_session(session_id) is None:
+        raise HTTPException(404, "Unknown or expired browser session")
     return await _patch(request)
 
 
-router.add_api_route("/api/offer", _patch, methods=["PATCH"])
 router.add_api_route("/sessions/{session_id}/api/offer", _patch_session, methods=["PATCH"])
