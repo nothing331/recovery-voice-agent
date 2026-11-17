@@ -128,3 +128,5 @@ Full rationale is in [the design spec](docs/superpowers/specs/2026-11-18-autopay
 - **Free tiers:** Plivo trial (about $10 credit, verified numbers only, reportedly valid for 3 weeks), Deepgram $200 free credit, and Gemini free-tier rate limits. A slow or exhausted provider can be replaced by changing config.
 - **Not production-ready:** no dashboard auth, no consent management, no live transcript during calls, no automatic retries of unanswered calls. Everything runs on a laptop, and the tunnel URL changes on restart.
 - **Compliance:** this demo ignores TRAI/DLT rules. Do not use it on real customers.
+- **Identity by name only (by design):** the agent confirms identity by the customer's name alone. Production use needs a merchant-approved verification step.
+- **"Don't call me" handling:** the request goes to human review and the customer stays callable, but the dashboard requires explicit confirmation ("Call anyway?", enforced by the backend) while the request is open. Production use needs immediate suppression of automated calls on opt-out.

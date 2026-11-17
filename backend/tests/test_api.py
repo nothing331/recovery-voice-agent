@@ -133,3 +133,40 @@ def test_finalize_saves_transcript_and_incomplete(client):
         {"role": "agent", "text": "Hello, am I speaking with Rohan Mehta?"},
         {"role": "customer", "text": "Yes speaking"},
     ]
+
+
+def _dnc(client, resolved=0):
+    client.conn.execute(
+        "INSERT INTO attention_items(customer_id, call_id, reason, notes, created_at, resolved) "
+        "VALUES('c1', NULL, 'do_not_call_request', 'stop', 'now', ?)", (resolved,))
+    client.conn.commit()
+
+
+def test_customers_open_attention_reasons(client):
+    _dnc(client)
+    cs = {c["id"]: c for c in client.get("/api/customers").json()}
+    assert cs["c1"]["open_attention_reasons"] == ["do_not_call_request"]
+    assert cs["c2"]["open_attention_reasons"] == []
+
+
+def test_dnc_blocks_without_override(client):
+    _dnc(client)
+    for r in (call(client), client.post("/api/browser-session", json={"customer_id": "c1"})):
+        assert r.status_code == 409
+        assert r.json()["detail"]["code"] == "do_not_call_request_open"
+    assert client.placed == []
+
+
+def test_dnc_allowed_with_override(client):
+    _dnc(client)
+    r = client.post("/api/calls", json={"customer_id": "c1", "to_number": NUM, "override_do_not_call": True})
+    assert r.status_code == 200
+    client.conn.execute("UPDATE calls SET status='completed'")
+    client.conn.commit()
+    r = client.post("/api/browser-session", json={"customer_id": "c1", "override_do_not_call": True})
+    assert r.status_code == 200
+
+
+def test_resolved_dnc_does_not_block(client):
+    _dnc(client, resolved=1)
+    assert call(client).status_code == 200

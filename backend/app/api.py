@@ -41,12 +41,20 @@ def _customer_or_404(conn, customer_id: str):
     return c
 
 
-def _check_callable(conn, customer_id: str):
+def _check_callable(conn, customer_id: str, override_do_not_call: bool = False):
     c = _customer_or_404(conn, customer_id)
     if c["debits_blocked"]:
         raise HTTPException(409, "Debits are blocked for this customer (fraud flag). Do not call.")
     if calls.has_active_call(conn, customer_id):
         raise HTTPException(409, "A call is already in progress for this customer.")
+    dnc_open = conn.execute(
+        "SELECT 1 FROM attention_items WHERE customer_id=? AND reason='do_not_call_request' AND resolved=0 LIMIT 1",
+        (customer_id,)).fetchone()
+    if dnc_open:
+        if not override_do_not_call:
+            raise HTTPException(409, {"code": "do_not_call_request_open",
+                                      "message": "This customer asked not to be called. Confirm to call anyway."})
+        logger.info("do_not_call override used for customer {}", customer_id)
     return c
 
 
@@ -55,13 +63,17 @@ async def list_customers():
     rows = store.get_conn().execute(
         "SELECT cu.*, "
         "(SELECT count(*) FROM attention_items a WHERE a.customer_id=cu.id AND a.resolved=0) AS open_attention_count, "
+        "(SELECT group_concat(DISTINCT a.reason) FROM attention_items a "
+        " WHERE a.customer_id=cu.id AND a.resolved=0) AS open_reasons, "
         "(SELECT outcome FROM calls c WHERE c.customer_id=cu.id AND c.outcome IS NOT NULL "
         " ORDER BY c.id DESC LIMIT 1) AS last_outcome "
         "FROM customers cu ORDER BY CAST(substr(cu.id,2) AS INTEGER)"
     ).fetchall()
     keys = ["id", "name", "plan", "amount_due", "due_date", "failure_reason", "persona",
             "expected_outcome", "status", "open_attention_count", "last_outcome"]
-    return [{**{k: r[k] for k in keys}, "debits_blocked": bool(r["debits_blocked"])} for r in rows]
+    return [{**{k: r[k] for k in keys}, "debits_blocked": bool(r["debits_blocked"]),
+             "open_attention_reasons": (r["open_reasons"] or "").split(",") if r["open_reasons"] else []}
+            for r in rows]
 
 
 @router.get("/api/numbers")
@@ -72,12 +84,13 @@ async def numbers():
 class StartCall(BaseModel):
     customer_id: str
     to_number: str
+    override_do_not_call: bool = False
 
 
 @router.post("/api/calls")
 async def start_call(body: StartCall):
     conn = store.get_conn()
-    _check_callable(conn, body.customer_id)
+    _check_callable(conn, body.customer_id, body.override_do_not_call)
     if body.to_number not in _verified():
         raise HTTPException(400, "That number is not verified for calls.")
     call_id = calls.create_call(conn, body.customer_id, body.to_number, "phone")
@@ -96,12 +109,13 @@ async def start_call(body: StartCall):
 
 class BrowserSession(BaseModel):
     customer_id: str
+    override_do_not_call: bool = False
 
 
 @router.post("/api/browser-session")
 async def browser_session(body: BrowserSession, request: Request):
     conn = store.get_conn()
-    _check_callable(conn, body.customer_id)
+    _check_callable(conn, body.customer_id, body.override_do_not_call)
     call_id = calls.create_call(conn, body.customer_id, "browser", "browser")
     token = store.new_browser_token(call_id)
     return {"url": str(request.base_url).rstrip("/") + f"/client/?sid={token}"}

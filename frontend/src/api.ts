@@ -17,6 +17,7 @@ export interface Customer {
   status: CustomerStatus
   debits_blocked: boolean
   open_attention_count: number
+  open_attention_reasons: string[]
   last_outcome: CallOutcome | null
 }
 
@@ -67,6 +68,13 @@ export interface CallDetail extends CallSummary {
   attention_items: Attention[]
 }
 
+export const DNC_CODE = 'do_not_call_request_open'
+
+export class ApiError extends Error {
+  code?: string
+  constructor(message: string, code?: string) { super(message); this.code = code }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let res: Response
   try {
@@ -79,11 +87,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
   if (!res.ok) {
     let msg = `Request failed (${res.status})`
+    let code: string | undefined
     try {
       const body = await res.json()
-      if (typeof body?.detail === 'string') msg = body.detail
+      const d = body?.detail
+      if (typeof d === 'string') msg = d
+      else if (typeof d?.message === 'string') msg = d.message
+      code = typeof d?.code === 'string' ? d.code : undefined
     } catch { /* non-JSON error body */ }
-    throw new Error(msg)
+    throw new ApiError(msg, code)
   }
   return res.json() as Promise<T>
 }
@@ -94,10 +106,10 @@ const post = <T>(path: string, body?: unknown) =>
 export const api = {
   customers: () => request<Customer[]>('/api/customers'),
   numbers: () => request<Numbers>('/api/numbers'),
-  startCall: (customer_id: Customer['id'], to_number: string) =>
-    post<{ call_id: number | string }>('/api/calls', { customer_id, to_number }),
-  browserSession: (customer_id: Customer['id']) =>
-    post<{ url: string }>('/api/browser-session', { customer_id }),
+  startCall: (customer_id: Customer['id'], to_number: string, override_do_not_call = false) =>
+    post<{ call_id: number | string }>('/api/calls', { customer_id, to_number, override_do_not_call }),
+  browserSession: (customer_id: Customer['id'], override_do_not_call = false) =>
+    post<{ url: string }>('/api/browser-session', { customer_id, override_do_not_call }),
   calls: () => request<CallSummary[]>('/api/calls'),
   call: (id: CallSummary['id']) => request<CallDetail>(`/api/calls/${id}`),
   attention: () => request<Attention[]>('/api/attention?resolved=false'),

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
-  api, formatTime, label, rupees,
+  api, ApiError, DNC_CODE, formatTime, label, rupees,
   type Attention, type CallDetail, type CallSummary, type Customer, type Latency, type Numbers,
 } from './api'
 
@@ -53,14 +53,26 @@ export function Customers({ notify, onChanged }: { notify: Notify; onChanged: ()
     try { await fn() } catch (e) { notify((e as Error).message) } finally { setBusy(null) }
   }
 
+  const confirmDnc = (c: Customer) =>
+    window.confirm(`${c.name} asked not to be called again. Call anyway?`)
+  const withDnc = async <T,>(c: Customer, fn: (override: boolean) => Promise<T>): Promise<T | null> => {
+    const flagged = c.open_attention_reasons.includes('do_not_call_request')
+    if (flagged && !confirmDnc(c)) return null
+    try { return await fn(flagged) } catch (e) {
+      if (!flagged && e instanceof ApiError && e.code === DNC_CODE && confirmDnc(c)) return fn(true)
+      throw e
+    }
+  }
+
   const call = (c: Customer) => run(`call-${c.id}`, async () => {
-    await api.startCall(c.id, target)
+    if (await withDnc(c, (o) => api.startCall(c.id, target, o)) === null) return
     notify(`Calling ${c.name} on ${target}…`)
     customers.reload(); onChanged()
   })
   const browser = (c: Customer) => run(`web-${c.id}`, async () => {
-    const { url } = await api.browserSession(c.id)
-    window.open(url, '_blank', 'noopener')
+    const res = await withDnc(c, (o) => api.browserSession(c.id, o))
+    if (!res) return
+    window.open(res.url, '_blank', 'noopener')
   })
   const reset = () => run('reset', async () => {
     await api.reset()
@@ -98,7 +110,10 @@ export function Customers({ notify, onChanged }: { notify: Notify; onChanged: ()
                 <td className="num">{rupees(c.amount_due)}<div className="muted small">due {c.due_date}</div></td>
                 <td>{label(c.failure_reason)}</td>
                 <td><Chip kind="status" value={c.status} /></td>
-                <td>{c.open_attention_count > 0 && <span className="badge">{c.open_attention_count}</span>}</td>
+                <td>
+                  {c.open_attention_count > 0 && <span className="badge">{c.open_attention_count}</span>}
+                  {c.open_attention_reasons.includes('do_not_call_request') && <span className="badge"> asked not to call</span>}
+                </td>
                 <td className="actions">
                   <button disabled={c.debits_blocked || !target || busy === `call-${c.id}`}
                     title={c.debits_blocked ? 'Debits blocked (fraud flag)' : undefined}
