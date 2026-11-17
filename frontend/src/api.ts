@@ -33,6 +33,14 @@ export interface CallSummary {
   summary: string | null
   started_at: string | null
   ended_at: string | null
+  avg_latency_ms: number | null
+}
+
+export interface ServiceTtfb { avg_ttfb_ms: number; count: number }
+export interface Latency {
+  turns_ms: number[]
+  response_ms: { avg: number; p50: number; p95: number; max: number; count: number }
+  services: { stt: ServiceTtfb; llm: ServiceTtfb; tts: ServiceTtfb }
 }
 
 export interface TranscriptLine { role: 'agent' | 'customer'; text: string }
@@ -53,6 +61,7 @@ export interface CallDetail extends CallSummary {
   promise_amount: number | null
   promise_date: string | null
   transcript: TranscriptLine[]
+  latency: Latency | null
   // Shape not fixed by the contract; rendered defensively.
   payment_attempts: Record<string, unknown>[]
   attention_items: Attention[]

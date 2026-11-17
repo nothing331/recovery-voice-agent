@@ -29,6 +29,7 @@ from pipecat.services.google.llm import GoogleLLMService
 from pipecat.services.openrouter.llm import OpenRouterLLMService
 
 from app import calls, store
+from app.latency import LatencyCollector
 from app.config import settings
 from app.prompt import build_system_prompt
 from app.tools import TOOL_SCHEMAS, CallSession
@@ -120,9 +121,16 @@ async def run_bot(transport, call_id: int | None, sample_rate: int = 8000) -> No
     pipeline = Pipeline(
         [transport.input(), stt, user_agg, llm, tts, transport.output(), assistant_agg]
     )
+    latency = LatencyCollector(call_id)
     worker = PipelineWorker(
         pipeline,
-        params=PipelineParams(audio_in_sample_rate=sample_rate, audio_out_sample_rate=sample_rate),
+        params=PipelineParams(
+            audio_in_sample_rate=sample_rate,
+            audio_out_sample_rate=sample_rate,
+            enable_metrics=True,
+            enable_usage_metrics=True,
+        ),
+        observers=latency.observers,
     )
 
     if session:
@@ -202,11 +210,12 @@ async def run_bot(transport, call_id: int | None, sample_rate: int = 8000) -> No
     finally:
         if timeout_task:
             timeout_task.cancel()
+        logger.info(latency.summary_line())
         if session:
             store.voicemail_hooks.pop(call_id, None)
             store.voicemail_calls.discard(call_id)
             try:
-                calls.finalize_call(conn, call_id, context.get_messages())
+                calls.finalize_call(conn, call_id, context.get_messages(), latency.stats())
             except Exception:
                 logger.exception(f"call {call_id}: failed to finalize")
         logger.info(f"call {call_id}: finished")

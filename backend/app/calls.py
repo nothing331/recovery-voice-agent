@@ -48,13 +48,14 @@ def extract_transcript(messages: list) -> list[dict]:
     return out
 
 
-def finalize_call(conn, call_id: int, messages: list) -> None:
+def finalize_call(conn, call_id: int, messages: list, latency: dict | None = None) -> None:
     """Idempotent: save transcript, default the outcome to incomplete, mark completed."""
     transcript = extract_transcript(messages)
     conn.execute(
         "UPDATE calls SET transcript_json=?, status='completed', "
-        "outcome=COALESCE(outcome,'incomplete'), ended_at=COALESCE(ended_at,?) WHERE id=?",
-        (json.dumps(transcript), now_iso(), call_id),
+        "outcome=COALESCE(outcome,'incomplete'), ended_at=COALESCE(ended_at,?), "
+        "latency_json=COALESCE(?,latency_json) WHERE id=?",
+        (json.dumps(transcript), now_iso(), json.dumps(latency) if latency else None, call_id),
     )
     conn.commit()
 

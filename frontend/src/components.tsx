@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   api, formatTime, label, rupees,
-  type Attention, type CallDetail, type CallSummary, type Customer, type Numbers,
+  type Attention, type CallDetail, type CallSummary, type Customer, type Latency, type Numbers,
 } from './api'
 
 type Notify = (msg: string) => void
@@ -114,6 +114,49 @@ export function Customers({ notify, onChanged }: { notify: Notify; onChanged: ()
   )
 }
 
+function latencyClass(ms: number) {
+  return ms < 1000 ? 'lat-good' : ms <= 2000 ? 'lat-warn' : 'lat-bad'
+}
+
+function LatencyValue({ ms }: { ms: number | null | undefined }) {
+  if (ms == null) return <span className="muted">—</span>
+  return <span className={`lat ${latencyClass(ms)}`}>{Math.round(ms)} ms</span>
+}
+
+function LatencySection({ l }: { l: Latency | null }) {
+  if (!l || (l.response_ms.count === 0 && l.turns_ms.length === 0)) {
+    return <div className="muted small">No latency data.</div>
+  }
+  const r = l.response_ms
+  const max = Math.max(1, ...l.turns_ms)
+  return (
+    <>
+      <div className="lat-grid">
+        {([['Avg', r.avg], ['P50', r.p50], ['P95', r.p95], ['Max', r.max]] as const).map(([k, v]) => (
+          <div key={k}><div className="muted small">{k} response</div><LatencyValue ms={v} /></div>
+        ))}
+      </div>
+      <div className="lat-grid">
+        {(['stt', 'llm', 'tts'] as const).map((k) => (
+          <div key={k}>
+            <div className="muted small">{k.toUpperCase()} TTFB</div>
+            {l.services[k].count ? <span>{Math.round(l.services[k].avg_ttfb_ms)} ms</span> : <span className="muted">—</span>}
+          </div>
+        ))}
+      </div>
+      <div className="lat-bars">
+        {l.turns_ms.map((t, i) => (
+          <div key={i} className="lat-row">
+            <span className="muted small">#{i + 1}</span>
+            <div className="lat-track"><div className={`lat-fill ${latencyClass(t)}`} style={{ width: `${(t / max) * 100}%` }} /></div>
+            <span className="small num">{Math.round(t)} ms</span>
+          </div>
+        ))}
+      </div>
+    </>
+  )
+}
+
 export function Calls({ notify, openId, setOpenId }: {
   notify: Notify; openId: CallSummary['id'] | null; setOpenId: (id: CallSummary['id'] | null) => void
 }) {
@@ -124,7 +167,7 @@ export function Calls({ notify, openId, setOpenId }: {
         <State data={calls.data} error={calls.error} empty="No calls yet." />
         {calls.data && calls.data.length > 0 && (
           <table className="clickable">
-            <thead><tr><th>When</th><th>Customer</th><th>Channel</th><th>Status</th><th>Outcome</th></tr></thead>
+            <thead><tr><th>When</th><th>Customer</th><th>Channel</th><th>Status</th><th>Outcome</th><th>Avg latency</th></tr></thead>
             <tbody>
               {calls.data.map((c) => (
                 <tr key={c.id} className={c.id === openId ? 'selected' : undefined} onClick={() => setOpenId(c.id)}>
@@ -133,6 +176,7 @@ export function Calls({ notify, openId, setOpenId }: {
                   <td>{label(c.channel)}</td>
                   <td>{label(c.status)}</td>
                   <td><Chip kind="outcome" value={c.outcome} /></td>
+                  <td className="num"><LatencyValue ms={c.avg_latency_ms} /></td>
                 </tr>
               ))}
             </tbody>
@@ -173,6 +217,8 @@ export function CallDetailPanel({ id, onClose }: { id: CallSummary['id']; notify
               <div key={i} className={`bubble ${t.role}`}>{t.text}</div>
             ))}
           </div>
+          <h4>Latency</h4>
+          <LatencySection l={c.latency} />
           <h4>Payment attempts</h4>
           {c.payment_attempts.length === 0 ? <div className="muted small">None</div> : (
             <ul className="plain">

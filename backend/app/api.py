@@ -107,7 +107,7 @@ async def browser_session(body: BrowserSession, request: Request):
 
 
 _CALL_COLS = ("c.id, c.customer_id, cu.name AS customer_name, c.to_number, c.channel, c.status, "
-              "c.outcome, c.summary, c.started_at, c.ended_at")
+              "c.outcome, c.summary, c.started_at, c.ended_at, c.latency_json")
 
 
 @router.get("/api/calls")
@@ -115,7 +115,20 @@ async def list_calls():
     rows = store.get_conn().execute(
         f"SELECT {_CALL_COLS} FROM calls c JOIN customers cu ON cu.id=c.customer_id ORDER BY c.id DESC"
     ).fetchall()
-    return [dict(r) for r in rows]
+    out = []
+    for r in rows:
+        d = dict(r)
+        lat = _latency(d.pop("latency_json"))
+        d["avg_latency_ms"] = lat["response_ms"]["avg"] if lat and lat["response_ms"]["count"] else None
+        out.append(d)
+    return out
+
+
+def _latency(raw):
+    try:
+        return json.loads(raw) if raw else None
+    except ValueError:
+        return None
 
 
 def _attention(r) -> dict:
@@ -136,6 +149,7 @@ async def get_call(call_id: int):
         raise HTTPException(404, "Unknown call")
     d = dict(r)
     d["transcript"] = json.loads(d.pop("transcript_json") or "[]")
+    d["latency"] = _latency(d.pop("latency_json"))
     d["payment_attempts"] = [
         dict(a) for a in conn.execute("SELECT * FROM payment_attempts WHERE call_id=? ORDER BY id", (call_id,))
     ]
