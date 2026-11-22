@@ -282,3 +282,48 @@ def test_machine_result_queues_or_hooks_for_active_call(nosig):
     store.voicemail_calls.discard(cid)
     nosig.post(f"/plivo/machine?call_id={cid}", data={"Machine": "false"})
     assert cid not in store.voicemail_calls
+
+
+# ---- ICE / TURN servers for browser calls ----
+
+def test_start_returns_ice_config_from_static_servers(client, monkeypatch):
+    monkeypatch.setattr(settings, "ice_servers",
+                        '[{"urls": ["turn:t.example:3478?transport=udp", "turn:t.example:53"], '
+                        '"username": "u", "credential": "p"}]')
+    u = client.post("/api/browser-session", json={"customer_id": "c1"}).json()["url"]
+    body = _start(client, u).json()
+    assert body["iceConfig"]["iceServers"] == [
+        {"urls": ["turn:t.example:3478?transport=udp"], "username": "u", "credential": "p"}]
+
+
+def test_start_without_ice_servers_has_no_ice_config(client):
+    u = client.post("/api/browser-session", json={"customer_id": "c1"}).json()["url"]
+    assert "iceConfig" not in _start(client, u).json()
+
+
+def test_cloudflare_turn_credentials_are_cached(monkeypatch):
+    import asyncio
+
+    import httpx
+
+    from app import ice
+
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(201, json={"iceServers": [
+            {"urls": ["stun:stun.cloudflare.com:3478", "stun:stun.cloudflare.com:53"]},
+            {"urls": ["turn:turn.cloudflare.com:3478?transport=udp"], "username": "cu", "credential": "cp"}]})
+
+    real = httpx.AsyncClient
+    monkeypatch.setattr(ice.httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+    monkeypatch.setattr(settings, "cloudflare_turn_key_id", "kid")
+    monkeypatch.setattr(settings, "cloudflare_turn_api_token", "tok")
+    monkeypatch.setitem(ice._cf_cache, "servers", None)
+    first = asyncio.run(ice.ice_servers())
+    second = asyncio.run(ice.ice_servers())
+    assert first == second and len(calls) == 1
+    assert calls[0].headers["authorization"] == "Bearer tok" and "/keys/kid/" in str(calls[0].url)
+    assert first[0] == {"urls": ["stun:stun.cloudflare.com:3478"]}
+    assert first[1]["username"] == "cu"

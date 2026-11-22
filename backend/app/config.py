@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     dashboard_password: str = ""
     # Render sets this to the service's https URL; used when PUBLIC_BASE_URL isn't set.
     render_external_url: str = ""
+    # TURN relay for browser calls on hosts without inbound UDP (see app/ice.py).
+    cloudflare_turn_key_id: str = ""
+    cloudflare_turn_api_token: str = ""
+    ice_servers: str = ""
 
     @field_validator("verified_numbers", mode="before")
     @classmethod

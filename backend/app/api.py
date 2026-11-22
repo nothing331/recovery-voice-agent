@@ -9,7 +9,7 @@ from loguru import logger
 from pydantic import BaseModel
 
 from pipecat.transports.base_transport import TransportParams
-from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
+from pipecat.transports.smallwebrtc.connection import IceServer, SmallWebRTCConnection
 from pipecat.transports.smallwebrtc.request_handler import (
     IceCandidate,
     SmallWebRTCPatchRequest,
@@ -18,7 +18,7 @@ from pipecat.transports.smallwebrtc.request_handler import (
 )
 from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
 
-from app import calls, seed, store, telephony
+from app import calls, ice, seed, store, telephony
 from app.bot import run_bot
 from app.config import settings
 from app.payments import INSTRUMENT_STATUSES
@@ -288,7 +288,13 @@ async def start_session(request: Request):
     session_id = store.start_browser_session(token)
     if session_id is None:
         raise HTTPException(403, "Unknown or expired browser session. Click 'Talk in browser' again.")
-    return {"sessionId": session_id}
+    result = {"sessionId": session_id}
+    # Both peers must use the same TURN relay: the bot's handler gets them, and so does the client.
+    servers = await ice.ice_servers()
+    if servers:
+        _webrtc.update_ice_servers([IceServer(**s) for s in servers])
+        result["iceConfig"] = {"iceServers": servers}
+    return result
 
 
 async def _handle_offer(session_id: str, req: SmallWebRTCRequest):
