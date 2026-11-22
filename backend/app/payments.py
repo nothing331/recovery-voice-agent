@@ -1,13 +1,18 @@
 from datetime import datetime, timezone
 
+INSTRUMENT_STATUSES = ("active", "expired", "lost")
+_INSTRUMENT_FAILURE = {"expired": "card_expired", "lost": "card_lost"}
+
 
 class DebitsBlocked(Exception):
     pass
 
 
 class FakePaymentProvider:
-    """Results come from the customer's seeded retry_result / partial_result.
-    Swap for a Razorpay test-mode adapter later by keeping these three methods."""
+    """Simulated bank. A charge succeeds only when the card/mandate is usable and the customer's
+    balance covers the amount; a successful charge deducts the balance. Balance and card status
+    are editable from the dashboard, so outcomes follow account state, not a scripted result.
+    Swap for a Razorpay test-mode adapter later by keeping retry / charge_partial / schedule."""
 
     def __init__(self, conn):
         self.conn = conn
@@ -26,17 +31,24 @@ class FakePaymentProvider:
         if commit:
             self.conn.commit()
 
-    def retry(self, customer_id, call_id, commit=True):
+    def _charge(self, customer_id, call_id, kind, amount, commit):
         c = self._customer(customer_id)
-        res = c["retry_result"]
-        self._record(customer_id, call_id, "retry", c["amount_due"], None, res, commit)
-        return res == "success", ("success" if res == "success" else res)
+        instrument = c["instrument_status"] or "active"
+        if instrument != "active":
+            res = _INSTRUMENT_FAILURE.get(instrument, "bank_decline")
+        elif amount > (c["balance"] or 0):
+            res = "insufficient_funds"
+        else:
+            res = "success"
+            self.conn.execute("UPDATE customers SET balance=balance-? WHERE id=?", (amount, customer_id))
+        self._record(customer_id, call_id, kind, amount, None, res, commit)
+        return res == "success", res
+
+    def retry(self, customer_id, call_id, amount, commit=True):
+        return self._charge(customer_id, call_id, "retry", amount, commit)
 
     def charge_partial(self, customer_id, call_id, amount, commit=True):
-        c = self._customer(customer_id)
-        res = c["partial_result"]
-        self._record(customer_id, call_id, "partial", amount, None, res, commit)
-        return res == "success", ("success" if res == "success" else res)
+        return self._charge(customer_id, call_id, "partial", amount, commit)
 
     def schedule(self, customer_id, call_id, amount, date, commit=True):
         self._customer(customer_id)

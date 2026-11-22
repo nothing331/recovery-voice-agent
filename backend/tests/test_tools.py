@@ -3,7 +3,7 @@ from datetime import date, timedelta
 import pytest
 
 from app import db, seed
-from app.tools import TOOL_SCHEMAS, CallSession
+from app.tools import FLAG_REASONS, OUTCOMES, TOOL_SCHEMAS, CallSession
 
 TODAY = date(2026, 11, 18)
 
@@ -58,7 +58,7 @@ def test_retry_success_and_once(conn):
     s.confirm_identity(True)
     assert s.retry_debit()["success"] is True
     assert status(conn, "c1") == "paid"
-    assert s.retry_debit()["error"] == "already_retried"
+    assert s.retry_debit()["error"] == "already_resolved"
 
 
 def test_retry_failure(conn):
@@ -295,3 +295,93 @@ def test_disposition_migration():
     c.executescript("CREATE TABLE calls(id INTEGER PRIMARY KEY, outcome TEXT, latency_json TEXT);")
     db.init_schema(c)
     assert "disposition" in {r[1] for r in c.execute("PRAGMA table_info(calls)")}
+
+
+# --- simulated bank: balance and card status decide charges ---
+
+def balance(conn, cid):
+    return conn.execute("SELECT balance FROM customers WHERE id=?", (cid,)).fetchone()["balance"]
+
+
+def test_retry_deducts_balance(conn):
+    s = make(conn, "c1")
+    s.confirm_identity(True)
+    before = balance(conn, "c1")
+    r = s.retry_debit()
+    assert r["success"] is True and balance(conn, "c1") == before - r["amount"]
+
+
+def test_low_balance_then_top_up_then_retry_limit(conn):
+    s = make(conn, "c2")
+    s.confirm_identity(True)
+    r = s.retry_debit()
+    assert r["success"] is False and r["reason"] == "insufficient_funds"
+    assert balance(conn, "c2") == 300
+    conn.execute("UPDATE customers SET balance=balance+2000 WHERE id='c2'")
+    conn.commit()
+    assert s.retry_debit()["success"] is True
+    assert status(conn, "c2") == "paid" and balance(conn, "c2") == 2300 - 1499
+
+
+def test_retry_at_most_twice_per_call(conn):
+    s = make(conn, "c2")
+    s.confirm_identity(True)
+    assert s.retry_debit()["success"] is False
+    assert s.retry_debit()["success"] is False
+    assert s.retry_debit()["error"] == "already_retried"
+
+
+def test_partial_on_expired_card_fails(conn):
+    s = make(conn, "c4")
+    s.confirm_identity(True)
+    r = s.take_partial_payment(200, iso(2))
+    assert r["success"] is False and r["reason"] == "card_expired"
+    assert s.retry_debit()["reason"] == "card_expired"
+    assert status(conn, "c4") == "due"
+    assert conn.execute("SELECT count(*) FROM payment_attempts WHERE kind='scheduled'").fetchone()[0] == 0
+    conn.execute("UPDATE customers SET instrument_status='active' WHERE id='c4'")
+    conn.commit()
+    assert s.retry_debit()["success"] is True
+
+
+def test_partial_over_balance_fails(conn):
+    s = make(conn, "c3")
+    s.confirm_identity(True)
+    assert s.take_partial_payment(1500, iso(2))["reason"] == "insufficient_funds"
+    assert balance(conn, "c3") == 1100
+    assert s.take_partial_payment(1000, iso(2))["success"] is True
+    assert balance(conn, "c3") == 100
+
+
+def test_callback_is_not_an_escalation(conn):
+    s = make(conn, "c9")
+    r = s.flag_for_human("callback_requested", "driving, call at 6 pm")
+    assert r["success"] is True and "callback" in r["message"]
+    assert status(conn, "c9") == "callback"
+    _calls.finalize_call(conn, s.call_id, [])
+    assert conn.execute("SELECT outcome FROM calls WHERE id=?", (s.call_id,)).fetchone()[0] == "callback"
+    assert s.end_call("callback", "x")["success"] is True
+
+
+def test_seed_scenarios_complete(conn):
+    rows = conn.execute("SELECT * FROM customers").fetchall()
+    assert len({r["scenario"] for r in rows}) == 10
+    for r in rows:
+        assert r["balance"] is not None and r["instrument_status"] in ("active", "expired", "lost")
+        assert r["expected_outcome"] in OUTCOMES and r["persona"] and r["scenario_tests"]
+        assert r["expected_flag"] is None or r["expected_flag"] in FLAG_REASONS
+
+
+def test_backfill_old_database_keeps_calls():
+    c = db.connect(":memory:")
+    c.executescript(
+        "CREATE TABLE customers(id TEXT PRIMARY KEY, name TEXT, phone TEXT, plan TEXT, amount_due INTEGER,"
+        " due_date TEXT, failure_reason TEXT, past_attempts INTEGER, persona TEXT, retry_result TEXT,"
+        " partial_result TEXT, expected_outcome TEXT, status TEXT DEFAULT 'due', debits_blocked INTEGER DEFAULT 0);"
+        "INSERT INTO customers(id,name,amount_due) VALUES('c2','Priya Nair',1499);")
+    db.init_schema(c)
+    c.execute("INSERT INTO calls(customer_id,status) VALUES('c2','completed')")
+    seed.backfill(c)
+    r = c.execute("SELECT * FROM customers WHERE id='c2'").fetchone()
+    assert r["balance"] == 300 and r["instrument_status"] == "active" and r["scenario"]
+    assert c.execute("SELECT count(*) FROM calls").fetchone()[0] == 1

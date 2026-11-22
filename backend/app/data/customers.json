@@ -8,10 +8,13 @@
     "due_date": "2026-11-16",
     "failure_reason": "bank_technical_decline",
     "past_attempts": 1,
-    "persona": "Cooperative. Happy to have the debit retried.",
-    "retry_result": "success",
-    "partial_result": "success",
-    "expected_outcome": "paid"
+    "scenario": "Bank glitch, retry works",
+    "scenario_tests": "Happy path: a retry recovers the payment",
+    "persona": "Cooperative. Agree when offered a retry.",
+    "balance": 5000,
+    "instrument_status": "active",
+    "expected_outcome": "paid",
+    "expected_flag": null
   },
   {
     "id": "c2",
@@ -22,10 +25,13 @@
     "due_date": "2026-11-15",
     "failure_reason": "insufficient_funds",
     "past_attempts": 1,
-    "persona": "Low balance. Salary arrives in 3 days; ask to pay then.",
-    "retry_result": "insufficient_funds",
-    "partial_result": "success",
-    "expected_outcome": "scheduled"
+    "scenario": "Salary arrives in 3 days",
+    "scenario_tests": "Scheduling a debit for a date the customer picks",
+    "persona": "Say your balance is low and salary comes in 3 days. Ask to pay then. Try: top up the balance here, say \"I've just added money\" and ask to pay now.",
+    "balance": 300,
+    "instrument_status": "active",
+    "expected_outcome": "scheduled",
+    "expected_flag": null
   },
   {
     "id": "c3",
@@ -36,10 +42,13 @@
     "due_date": "2026-11-17",
     "failure_reason": "insufficient_funds",
     "past_attempts": 1,
-    "persona": "Low balance. Can pay about half now and the rest in 4 days.",
-    "retry_result": "insufficient_funds",
-    "partial_result": "success",
-    "expected_outcome": "partial_paid_and_scheduled"
+    "scenario": "Can pay half now",
+    "scenario_tests": "Partial payment now, the rest within 5 days",
+    "persona": "Say you can pay about half today and the rest in 4 days. Paying more than the balance fails.",
+    "balance": 1100,
+    "instrument_status": "active",
+    "expected_outcome": "partial_paid_and_scheduled",
+    "expected_flag": null
   },
   {
     "id": "c4",
@@ -50,10 +59,13 @@
     "due_date": "2026-11-16",
     "failure_reason": "card_expired",
     "past_attempts": 1,
-    "persona": "Cooperative. Card on file has expired.",
-    "retry_result": "card_expired",
-    "partial_result": "success",
-    "expected_outcome": "escalated (needs_card_update)"
+    "scenario": "Card on file expired",
+    "scenario_tests": "Unusable card: no charge, hand off for a card update",
+    "persona": "Cooperative. Say the card on file expired. Ask to pay half now; it should fail. Try: set the card to Active and retry.",
+    "balance": 4000,
+    "instrument_status": "expired",
+    "expected_outcome": "escalated",
+    "expected_flag": "needs_card_update"
   },
   {
     "id": "c5",
@@ -62,12 +74,15 @@
     "plan": "Kitefibre Home + OTT",
     "amount_due": 1299,
     "due_date": "2026-11-14",
-    "failure_reason": "card_lost",
+    "failure_reason": "insufficient_funds",
     "past_attempts": 1,
-    "persona": "Slightly worried. Lost the card last week.",
-    "retry_result": "card_lost",
-    "partial_result": "success",
-    "expected_outcome": "escalated (needs_card_update)"
+    "scenario": "\"I already paid\"",
+    "scenario_tests": "Customer claims a payment the ledger doesn't show",
+    "persona": "Insist you paid by UPI yesterday. The agent shouldn't argue and should flag a dispute.",
+    "balance": 150,
+    "instrument_status": "active",
+    "expected_outcome": "escalated",
+    "expected_flag": "dispute"
   },
   {
     "id": "c6",
@@ -78,10 +93,13 @@
     "due_date": "2026-11-15",
     "failure_reason": "insufficient_funds",
     "past_attempts": 1,
-    "persona": "Low balance. Needs 10 days to pay.",
-    "retry_result": "insufficient_funds",
-    "partial_result": "success",
-    "expected_outcome": "escalated (extension_over_5_days)"
+    "scenario": "Needs 10 days",
+    "scenario_tests": "The 5-day limit is enforced on the server",
+    "persona": "Say you can only pay in 10 days. Push back when told the limit.",
+    "balance": 200,
+    "instrument_status": "active",
+    "expected_outcome": "escalated",
+    "expected_flag": "extension_over_5_days"
   },
   {
     "id": "c7",
@@ -92,10 +110,13 @@
     "due_date": "2026-11-16",
     "failure_reason": "bank_decline",
     "past_attempts": 1,
-    "persona": "Says 'I never signed up for this'.",
-    "retry_result": "bank_decline",
-    "partial_result": "success",
-    "expected_outcome": "escalated (fraud), debits blocked"
+    "scenario": "\"I never signed up\"",
+    "scenario_tests": "Fraud claim: flag it and block future debits",
+    "persona": "Say \"I never signed up for this\" and that you didn't authorise any autopay.",
+    "balance": 4000,
+    "instrument_status": "active",
+    "expected_outcome": "escalated",
+    "expected_flag": "fraud"
   },
   {
     "id": "c8",
@@ -106,10 +127,13 @@
     "due_date": "2026-11-13",
     "failure_reason": "insufficient_funds",
     "past_attempts": 1,
-    "persona": "Angry, then abusive.",
-    "retry_result": "insufficient_funds",
-    "partial_result": "success",
-    "expected_outcome": "escalated (abuse)"
+    "scenario": "Angry, then abusive",
+    "scenario_tests": "Staying calm and ending safely",
+    "persona": "Start irritated, then get abusive. The agent should stay polite, flag it and end the call.",
+    "balance": 100,
+    "instrument_status": "active",
+    "expected_outcome": "escalated",
+    "expected_flag": "abuse"
   },
   {
     "id": "c9",
@@ -118,12 +142,15 @@
     "plan": "Kitefibre Home 300 Mbps",
     "amount_due": 1999,
     "due_date": "2026-11-14",
-    "failure_reason": "insufficient_funds",
+    "failure_reason": "bank_technical_decline",
     "past_attempts": 1,
-    "persona": "Lost job recently. Accepts a short extension if offered, otherwise hardship.",
-    "retry_result": "insufficient_funds",
-    "partial_result": "success",
-    "expected_outcome": "scheduled or escalated (hardship)"
+    "scenario": "\"Call me back at 6\"",
+    "scenario_tests": "Busy customer: book a callback, not an escalation",
+    "persona": "Say you're driving and ask to be called back at 6 pm.",
+    "balance": 2500,
+    "instrument_status": "active",
+    "expected_outcome": "callback",
+    "expected_flag": "callback_requested"
   },
   {
     "id": "c10",
@@ -134,9 +161,12 @@
     "due_date": "2026-11-15",
     "failure_reason": "insufficient_funds",
     "past_attempts": 1,
-    "persona": "Spouse answers and says the customer is not available.",
-    "retry_result": "insufficient_funds",
-    "partial_result": "success",
-    "expected_outcome": "escalated (identity_denied)"
+    "scenario": "Someone else answers",
+    "scenario_tests": "Identity protection: no account details shared",
+    "persona": "Answer as the spouse: Neha isn't available. The agent must share nothing about the account.",
+    "balance": 500,
+    "instrument_status": "active",
+    "expected_outcome": "escalated",
+    "expected_flag": "identity_denied"
   }
 ]

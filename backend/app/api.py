@@ -21,6 +21,7 @@ from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
 from app import calls, seed, store, telephony
 from app.bot import run_bot
 from app.config import settings
+from app.payments import INSTRUMENT_STATUSES
 
 router = APIRouter()
 _bot_tasks: set[asyncio.Task] = set()
@@ -58,9 +59,26 @@ def _check_callable(conn, customer_id: str, override_do_not_call: bool = False):
     return c
 
 
+def _scenario_result(conn, r, edited: bool) -> tuple[str | None, list[str]]:
+    """Compare the customer's latest finished call with the scenario's expected outcome and flag.
+    Returns (result, flags on that call); result is None when not run yet or the account was edited."""
+    last = conn.execute(
+        "SELECT id, outcome FROM calls WHERE customer_id=? AND outcome IS NOT NULL ORDER BY id DESC LIMIT 1",
+        (r["id"],)).fetchone()
+    if not last:
+        return None, []
+    flags = [f[0] for f in conn.execute(
+        "SELECT DISTINCT reason FROM attention_items WHERE call_id=? ORDER BY reason", (last["id"],))]
+    if edited or not r["expected_outcome"]:
+        return None, flags
+    ok = last["outcome"] == r["expected_outcome"] and (not r["expected_flag"] or r["expected_flag"] in flags)
+    return ("pass" if ok else "fail"), flags
+
+
 @router.get("/api/customers")
 async def list_customers():
-    rows = store.get_conn().execute(
+    conn = store.get_conn()
+    rows = conn.execute(
         "SELECT cu.*, "
         "(SELECT count(*) FROM attention_items a WHERE a.customer_id=cu.id AND a.resolved=0) AS open_attention_count, "
         "(SELECT group_concat(DISTINCT a.reason) FROM attention_items a "
@@ -69,11 +87,56 @@ async def list_customers():
         " ORDER BY c.id DESC LIMIT 1) AS last_outcome "
         "FROM customers cu ORDER BY CAST(substr(cu.id,2) AS INTEGER)"
     ).fetchall()
-    keys = ["id", "name", "plan", "amount_due", "due_date", "failure_reason", "persona",
-            "expected_outcome", "status", "open_attention_count", "last_outcome"]
-    return [{**{k: r[k] for k in keys}, "debits_blocked": bool(r["debits_blocked"]),
-             "open_attention_reasons": (r["open_reasons"] or "").split(",") if r["open_reasons"] else []}
-            for r in rows]
+    keys = ["id", "name", "plan", "amount_due", "due_date", "failure_reason", "scenario", "scenario_tests",
+            "persona", "expected_outcome", "expected_flag", "balance", "instrument_status", "status",
+            "open_attention_count", "last_outcome"]
+    defaults = seed.defaults()
+    out = []
+    for r in rows:
+        d = defaults.get(r["id"], {})
+        edited = bool(r["account_edited"])  # set by the dashboard only; payments lowering the balance don't count
+        result, flags = _scenario_result(conn, r, edited)
+        out.append({**{k: r[k] for k in keys}, "debits_blocked": bool(r["debits_blocked"]),
+                    "open_attention_reasons": (r["open_reasons"] or "").split(",") if r["open_reasons"] else [],
+                    "default_balance": d.get("balance"), "default_instrument_status": d.get("instrument_status"),
+                    "account_edited": edited, "last_call_flags": flags, "result": result})
+    return out
+
+
+MAX_BALANCE = 10_000_000
+
+
+class AccountUpdate(BaseModel):
+    balance: int | None = None
+    top_up: int | None = None
+    instrument_status: str | None = None
+
+
+@router.post("/api/customers/{customer_id}/account")
+async def update_account(customer_id: str, body: AccountUpdate):
+    """Edit the simulated bank behind a customer: top up or set the balance, change the card status.
+    The agent never sees these values; they only decide whether a charge succeeds."""
+    conn = store.get_conn()
+    c = _customer_or_404(conn, customer_id)
+    balance = c["balance"] or 0
+    if body.balance is not None:
+        balance = body.balance
+    if body.top_up is not None:
+        if body.top_up <= 0:
+            raise HTTPException(400, "Top-up must be a positive amount.")
+        balance += body.top_up
+    if not 0 <= balance <= MAX_BALANCE:
+        raise HTTPException(400, f"Balance must be between 0 and {MAX_BALANCE}.")
+    instrument = body.instrument_status or c["instrument_status"]
+    if instrument not in INSTRUMENT_STATUSES:
+        raise HTTPException(400, f"Card status must be one of: {', '.join(INSTRUMENT_STATUSES)}.")
+    d = seed.defaults().get(customer_id, {})
+    edited = (balance, instrument) != (d.get("balance"), d.get("instrument_status"))
+    conn.execute("UPDATE customers SET balance=?, instrument_status=?, account_edited=? WHERE id=?",
+                 (balance, instrument, int(edited), customer_id))
+    conn.commit()
+    logger.info("account {} edited: balance={} instrument={}", customer_id, balance, instrument)
+    return {"balance": balance, "instrument_status": instrument}
 
 
 @router.get("/api/numbers")

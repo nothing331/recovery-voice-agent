@@ -24,6 +24,11 @@ class Settings(BaseSettings):
     company_name: str = "Kitefibre"
     agent_name: str = "Meera"
     db_path: str = "recovery.db"
+    # When set (hosted deploys), everything except /plivo/* needs HTTP Basic auth with this password,
+    # from any host. When empty, the local-only tunnel guard applies instead.
+    dashboard_password: str = ""
+    # Render sets this to the service's https URL; used when PUBLIC_BASE_URL isn't set.
+    render_external_url: str = ""
 
     @field_validator("verified_numbers", mode="before")
     @classmethod
@@ -31,6 +36,10 @@ class Settings(BaseSettings):
         if isinstance(v, str):
             return [n.strip() for n in v.split(",") if n.strip()]
         return v
+
+    def model_post_init(self, __context) -> None:
+        if not self.public_base_url and self.render_external_url:
+            self.public_base_url = self.render_external_url
 
 
 settings = Settings()

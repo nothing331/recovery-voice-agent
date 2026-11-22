@@ -8,9 +8,11 @@ from .rules import MAX_SCHEDULE_DAYS, validate_schedule_date
 from datetime import timedelta
 
 FLAG_REASONS = ["identity_denied", "do_not_call_request", "needs_card_update", "fraud", "dispute",
-                "wants_human", "hardship", "abuse", "extension_over_5_days"]
+                "wants_human", "hardship", "abuse", "extension_over_5_days", "callback_requested"]
 FINANCIAL = ("paid", "scheduled", "partial_paid_and_scheduled")
-OUTCOMES = ["paid", "scheduled", "partial_paid_and_scheduled", "escalated", "voicemail", "no_answer", "incomplete"]
+OUTCOMES = ["paid", "scheduled", "partial_paid_and_scheduled", "escalated", "callback", "voicemail", "no_answer",
+            "incomplete"]
+MAX_RETRIES_PER_CALL = 2
 
 REASON_PLAIN = {
     "insufficient_funds": "there wasn't enough balance in the account at the time",
@@ -29,7 +31,7 @@ class CallSession:
     def __init__(self, conn, call_id: int, customer_id: str, today: date):
         self.conn, self.call_id, self.customer_id, self.today = conn, call_id, customer_id, today
         self.identity_confirmed = False
-        self.retried = False
+        self.retries = 0
         self.payments = FakePaymentProvider(conn)
 
     # helpers
@@ -113,28 +115,28 @@ class CallSession:
     def retry_debit(self) -> dict:
         if (e := self._locked()):
             return e
-        if self.retried:
+        if self.retries >= MAX_RETRIES_PER_CALL:
             return {"error": "already_retried",
-                    "message": "A retry was already made on this call. Offer to schedule the debit within 5 days instead."}
+                    "message": "The debit was already retried on this call. Do not retry again. Offer to schedule it within 5 days or a partial payment instead."}
         if (e := self._resolved()):
             return e
-        self.retried = True
+        self.retries += 1
+        amount = self._remaining()
         try:
             with self._txn():
-                ok, reason = self.payments.retry(self.customer_id, self.call_id, commit=False)
-                c = self._customer()
+                ok, reason = self.payments.retry(self.customer_id, self.call_id, amount, commit=False)
                 if ok:
                     self._set_status("paid", commit=False)
-                    self._promise(c["amount_due"], self.today.isoformat(), commit=False)
+                    self._promise(amount, self.today.isoformat(), commit=False)
         except DebitsBlocked:
             return self._locked() or {"error": "debits_blocked"}
         except Exception as e:
             return self._failed(e)
         if ok:
-            return {"success": True, "amount": c["amount_due"],
+            return {"success": True, "amount": amount,
                     "message": "Payment went through. Confirm it to the customer, thank them and end the call."}
         return {"success": False, "reason": reason,
-                "message": f"The retry failed ({REASON_PLAIN.get(reason, reason)}). Do not retry again. Offer to schedule the debit within 5 days, a partial payment, or flag for a human if the card is unusable."}
+                "message": f"The retry failed ({REASON_PLAIN.get(reason, reason)}). Do not retry again unless the customer says they have just added money or fixed their card. Otherwise offer to schedule the debit within 5 days, a partial payment, or flag for a human if the card is unusable."}
 
     def schedule_debit(self, date: str, amount: int | None = None) -> dict:
         if (e := self._locked()):
@@ -199,14 +201,20 @@ class CallSession:
         self.conn.execute(
             "INSERT INTO attention_items(customer_id,call_id,reason,notes,created_at,resolved) VALUES(?,?,?,?,?,0)",
             (self.customer_id, self.call_id, reason, notes.strip(), _now()))
+        status = self._customer()["status"]
         if reason == "fraud":
             self.conn.execute("UPDATE customers SET debits_blocked=1 WHERE id=?", (self.customer_id,))
             self._set_status("blocked")
-        elif self._customer()["status"] not in ("paid", "scheduled", "partial_scheduled"):
+        elif reason == "callback_requested":
+            if status in ("due", "callback"):
+                self._set_status("callback")
+        elif status not in ("paid", "scheduled", "partial_scheduled", "blocked"):
             self._set_status("escalated")
         self.conn.commit()
         return {"success": True,
-                "message": "Flagged for the team. Tell the customer someone will follow up, then end the call politely."}
+                "message": ("Callback noted. Confirm the time with the customer, then end the call with outcome callback."
+                            if reason == "callback_requested" else
+                            "Flagged for the team. Tell the customer someone will follow up, then end the call politely.")}
 
     def end_call(self, outcome: str, summary: str) -> dict:
         if outcome not in OUTCOMES:
@@ -229,7 +237,7 @@ TOOL_SCHEMAS = [
      "description": "Record whether the person confirmed they are the customer by full name. Call with true only if they clearly said yes. Returns account details only when true.",
      "parameters": {"type": "object", "properties": {"confirmed": {"type": "boolean", "description": "True if the person confirmed they are the customer."}}, "required": ["confirmed"]}},
     {"name": "retry_debit",
-     "description": "Retry the failed autopay debit now. Allowed once per call. Do not use when the customer says the balance is low.",
+     "description": "Retry the failed autopay debit now for the outstanding amount. At most twice per call: retry a second time only if the customer says they have just added money or fixed their card. Do not use when the customer says the balance is low.",
      "parameters": {"type": "object", "properties": {}}},
     {"name": "schedule_debit",
      "description": "Schedule the debit for a date at most 5 days from today (today counts as day 0). Amount defaults to the full outstanding amount.",

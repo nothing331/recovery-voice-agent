@@ -88,28 +88,37 @@ Open the dashboard at the Vite URL (default http://localhost:5173).
 
 1. Open the dashboard and click **Reset demo data**.
 2. Choose a verified number in the **Call to** dropdown (the default is your own phone).
-3. Click **Call** on **Rohan Mehta** (scenario 1). Answer, play the persona, and confirm the name. Expect `paid`.
-4. Repeat for **Priya Nair** (scenario 2) and **Karthik Menon** (scenario 7, the fraud case, which blocks future debits).
+3. Click **Call** on scenario 1 (Rohan Mehta). Answer, follow **How to play** on the card, and confirm the name. The card turns **Passed** when the call ends.
+4. Repeat for scenario 2 (Priya Nair): first schedule, then on a second run top up her balance mid-call and ask to pay now. Then scenario 7 (the fraud case, which blocks future debits).
 5. Check each outcome under **Calls** (transcript, payment attempts) and **Needs attention**. Use **Mark resolved** on a flagged item.
 
 ## Scenarios
 
-Each customer has a persona for whoever answers. Use the persona from the table. Ask the agent to confirm your name, then follow the script.
+The **Customers** tab shows one card per scenario. Each card has what the scenario tests, how to play the customer, the expected outcome and flag, and, after a call, the actual outcome with a **Passed** / **Didn't match** badge. A scoreboard at the top counts passed, mismatched and not-run scenarios.
 
-| # | Customer | Situation | How to role-play | Expected outcome |
-|---|---|---|---|---|
-| 1 | Rohan Mehta | Bank technical decline | Cooperative. Agree to a retry. | `paid` |
-| 2 | Priya Nair | Low balance | Salary arrives in 3 days. Ask to pay then. | `scheduled` |
-| 3 | Arjun Reddy | Low balance | Can pay about half now, rest in 4 days. | `partial_paid_and_scheduled` |
-| 4 | Sneha Iyer | Card expired | Cooperative. Say the card on file has expired. | Flag `needs_card_update` |
-| 5 | Vikram Singh | Card lost | Slightly worried. Say the card was lost last week. | Flag `needs_card_update` |
-| 6 | Ananya Das | Low balance | Needs 10 days to pay. | Flag `extension_over_5_days` |
-| 7 | Karthik Menon | Bank decline | Say "I never signed up for this." | Flag `fraud`, debits blocked |
-| 8 | Deepa Joshi | Low balance | Get angry, then abusive. | Flag `abuse`, call ends politely |
-| 9 | Manoj Kulkarni | Low balance | Lost job recently. Accept a short extension if offered, otherwise hardship. | `scheduled` or flag `hardship` |
-| 10 | Neha Kapoor | Low balance | A spouse answers and says the customer is not available. | Flag `identity_denied` with a note |
+| # | Scenario | Customer | Tests | How to play | Expected |
+|---|---|---|---|---|---|
+| 1 | Bank glitch, retry works | Rohan Mehta | Happy path | Agree to a retry. | `paid` |
+| 2 | Salary arrives in 3 days | Priya Nair | Scheduling | Balance is low; pay in 3 days. | `scheduled` |
+| 3 | Can pay half now | Arjun Reddy | Partial payment | Pay about half now, the rest in 4 days. | `partial_paid_and_scheduled` |
+| 4 | Card on file expired | Sneha Iyer | Unusable card | Say the card expired; ask to pay half now (it fails). | `escalated` + `needs_card_update` |
+| 5 | "I already paid" | Vikram Singh | Claimed payment not in the ledger | Insist you paid by UPI yesterday. | `escalated` + `dispute` |
+| 6 | Needs 10 days | Ananya Das | 5-day limit on the server | Ask for 10 days. | `escalated` + `extension_over_5_days` |
+| 7 | "I never signed up" | Karthik Menon | Fraud, debits blocked | Say you never authorised it. | `escalated` + `fraud` |
+| 8 | Angry, then abusive | Deepa Joshi | Safe exit | Get abusive. | `escalated` + `abuse` |
+| 9 | "Call me back at 6" | Manoj Kulkarni | Callback, not an escalation | Say you're driving; call at 6 pm. | `callback` + `callback_requested` |
+| 10 | Someone else answers | Neha Kapoor | Identity protection | Answer as the spouse. | `escalated` + `identity_denied` |
 
-Also test by asking "am I talking to a bot?" during any call. The agent should say it is an automated assistant and continue. Ask it to stop calling you to see the `do_not_call_request` flag, which goes to a human and does not opt the customer out.
+Also try "am I talking to a bot?" in any call (the agent says it is an automated assistant), or "don't call me again" (flag `do_not_call_request`, goes to a human).
+
+### Simulated bank
+
+Each card has a **Simulated bank** panel: the customer's balance and card status (Active, Expired, Reported lost). The agent can't see these values. A charge succeeds only when the card is active and the balance covers the amount, and a successful charge lowers the balance. Use the panel to change the situation mid-demo:
+
+- On Priya, say "pay now" (fails: ₹300 balance), click **+₹1,000** twice, then say "I've just added money, try again". The second retry succeeds.
+- On Sneha, set the card to **Active** and ask to pay now. The payment goes through.
+
+An edited card is marked **Custom run** rather than passed or failed, because the expected outcome is for the default state. **Restore** puts the defaults back; **Reset demo data** restores everything.
 
 ## Design decisions
 
@@ -118,7 +127,8 @@ Full rationale is in [the design spec](docs/superpowers/specs/2026-11-18-autopay
 - **Identity by name only (§6.2).** The agent asks "Am I speaking with <full name>?" and asks for no PIN or date of birth. A bad-faith caller could claim not to know a secret, so a secret adds friction without adding safety. Amounts and account details are not revealed until the name is confirmed.
 - **Identity denial and do-not-call go to human review (§6.2).** If someone says they are not the customer, the agent shares nothing and flags `identity_denied`. A "don't call me again" request is logged with `do_not_call_request`. The agent does not opt the customer out, because a defaulting customer could use that request to stop collection.
 - **Five-day schedule limit enforced on the server (§6.3).** `schedule_debit` and `take_partial_payment` validate the 5-day limit in the tool handlers, not only in the prompt. The agent cannot promise a date beyond 5 days, even if it tries.
-- **Fake payment provider for deterministic demos (§6.4).** Each customer has preset results (for example, retry succeeds for Rohan and fails with `insufficient_funds` for Priya). The provider sits behind a `PaymentProvider` interface, so a real adapter (Razorpay / UPI AutoPay) can be added without changing the agent.
+- **Simulated bank instead of scripted results (§6.4).** Each customer has a balance and a card status; charges succeed or fail from that state, never from a preset result. Outcomes come from what the customer says plus the account state, and reviewers can change the state from the dashboard. The provider keeps the `retry` / `charge_partial` / `schedule` interface, so a real adapter (Razorpay / UPI AutoPay) can replace it without changing the agent.
+- **Retry at most twice per call.** The second retry is only for when the customer says they just added money or fixed their card; the server refuses a third.
 - **Fixed action set.** The agent has exactly three payment actions and a fixed set of flag reasons. Everything else is flagged for a human and the call ends politely (§6.2).
 
 ## Known limits

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
-  api, ApiError, DNC_CODE, formatTime, label, rupees,
-  type Attention, type CallDetail, type CallSummary, type Customer, type Latency, type Numbers,
+  api, ApiError, DNC_CODE, formatTime, INSTRUMENT_STATUSES, label, rupees,
+  type AccountUpdate, type Attention, type CallDetail, type CallSummary, type Customer, type Latency,
 } from './api'
 
 type Notify = (msg: string) => void
@@ -43,10 +43,7 @@ function State({ data, error, empty }: { data: unknown[] | null; error: string |
 
 export function Customers({ notify, onChanged }: { notify: Notify; onChanged: () => void }) {
   const customers = usePolled(api.customers, 5000)
-  const numbers = usePolled<Numbers>(api.numbers)
-  const [to, setTo] = useState('')
   const [busy, setBusy] = useState<string | null>(null)
-  const target = to || numbers.data?.default || ''
 
   const run = async (key: string, fn: () => Promise<void>) => {
     setBusy(key)
@@ -64,15 +61,14 @@ export function Customers({ notify, onChanged }: { notify: Notify; onChanged: ()
     }
   }
 
-  const call = (c: Customer) => run(`call-${c.id}`, async () => {
-    if (await withDnc(c, (o) => api.startCall(c.id, target, o)) === null) return
-    notify(`Calling ${c.name} on ${target}…`)
-    customers.reload(); onChanged()
-  })
   const browser = (c: Customer) => run(`web-${c.id}`, async () => {
     const res = await withDnc(c, (o) => api.browserSession(c.id, o))
     if (!res) return
     window.open(res.url, '_blank', 'noopener')
+  })
+  const account = (c: Customer, body: AccountUpdate) => run(`acct-${c.id}`, async () => {
+    await api.account(c.id, body)
+    customers.reload()
   })
   const reset = () => run('reset', async () => {
     await api.reset()
@@ -83,49 +79,133 @@ export function Customers({ notify, onChanged }: { notify: Notify; onChanged: ()
   return (
     <section>
       <div className="toolbar">
-        <label>
-          Call to&nbsp;
-          <select value={target} onChange={(e) => setTo(e.target.value)} disabled={!numbers.data}>
-            {(numbers.data?.numbers ?? []).map((n) => <option key={n} value={n}>{n}</option>)}
-          </select>
-        </label>
-        {numbers.error && <span className="muted small">Numbers unavailable</span>}
         <span className="spacer" />
         <button className="ghost" onClick={reset} disabled={busy === 'reset'}>Reset demo data</button>
       </div>
       <State data={customers.data} error={customers.error} empty="No customers." />
       {customers.data && customers.data.length > 0 && (
-        <table>
-          <thead>
-            <tr><th>Customer</th><th>Plan</th><th>Amount</th><th>Failure reason</th><th>Status</th><th>Flags</th><th /></tr>
-          </thead>
-          <tbody>
-            {customers.data.map((c) => (
-              <tr key={c.id}>
-                <td>
-                  <div className="strong">{c.name}</div>
-                  <div className="muted small">{c.persona} · expects {label(c.expected_outcome)}</div>
-                </td>
-                <td>{c.plan}</td>
-                <td className="num">{rupees(c.amount_due)}<div className="muted small">due {c.due_date}</div></td>
-                <td>{label(c.failure_reason)}</td>
-                <td><Chip kind="status" value={c.status} /></td>
-                <td>
-                  {c.open_attention_count > 0 && <span className="badge">{c.open_attention_count}</span>}
-                  {c.open_attention_reasons.includes('do_not_call_request') && <span className="badge"> asked not to call</span>}
-                </td>
-                <td className="actions">
-                  <button disabled={c.debits_blocked || !target || busy === `call-${c.id}`}
-                    title={c.debits_blocked ? 'Debits blocked (fraud flag)' : undefined}
-                    onClick={() => call(c)}>Call</button>
-                  <button className="ghost" disabled={busy === `web-${c.id}`} onClick={() => browser(c)}>Talk in browser</button>
-                </td>
-              </tr>
+        <>
+          <Scoreboard customers={customers.data} />
+          <div className="scenarios">
+            {customers.data.map((c, i) => (
+              <ScenarioCard key={c.id} n={i + 1} c={c} busy={busy}
+                onBrowser={() => browser(c)} onAccount={(b) => account(c, b)} />
             ))}
-          </tbody>
-        </table>
+          </div>
+        </>
       )}
     </section>
+  )
+}
+
+function Scoreboard({ customers }: { customers: Customer[] }) {
+  const passed = customers.filter((c) => c.result === 'pass').length
+  const failed = customers.filter((c) => c.result === 'fail').length
+  const notRun = customers.filter((c) => !c.last_outcome).length
+  return (
+    <div className="scoreboard">
+      <span><b>{customers.length}</b> scenarios</span>
+      <span className="score-pass"><b>{passed}</b> passed</span>
+      <span className="score-fail"><b>{failed}</b> didn't match</span>
+      <span className="muted"><b>{notRun}</b> not run yet</span>
+      <span className="spacer" />
+      <span className="muted small">Change a balance or card below to see the agent handle a different situation.</span>
+    </div>
+  )
+}
+
+function ResultBadge({ c }: { c: Customer }) {
+  if (c.result === 'pass') return <span className="result result-pass">✓ Passed</span>
+  if (c.result === 'fail') return <span className="result result-fail">✗ Didn't match</span>
+  if (c.last_outcome && c.account_edited) return <span className="result result-custom">Custom run</span>
+  return <span className="result result-none">Not run</span>
+}
+
+const CARD_LABEL: Record<string, string> = { active: 'Active', expired: 'Expired', lost: 'Reported lost' }
+
+function ScenarioCard({ n, c, busy, onBrowser, onAccount }: {
+  n: number; c: Customer; busy: string | null
+  onBrowser: () => void; onAccount: (body: AccountUpdate) => void
+}) {
+  const acctBusy = busy === `acct-${c.id}`
+  const short = c.amount_due - c.balance
+  return (
+    <article className="scenario">
+      <div className="sc-head">
+        <span className="sc-num">{n}</span>
+        <div className="sc-title">
+          <h3>{c.scenario}</h3>
+          <div className="muted small">{c.scenario_tests}</div>
+        </div>
+        <ResultBadge c={c} />
+      </div>
+
+      <div className="sc-customer small">
+        <span className="strong">{c.name}</span> · {c.plan} · <span className="num">{rupees(c.amount_due)}</span> due {c.due_date}
+        <div className="muted">Autopay failed: {label(c.failure_reason)}</div>
+      </div>
+
+      <p className="sc-play"><span className="sc-label">How to play</span>{c.persona}</p>
+
+      <div className="sc-grid">
+        <div>
+          <span className="sc-label">Expected</span>
+          <Chip kind="outcome" value={c.expected_outcome} />
+          {c.expected_flag && <> <Chip kind="reason" value={c.expected_flag} /></>}
+        </div>
+        <div>
+          <span className="sc-label">Last call</span>
+          {c.last_outcome ? (
+            <>
+              <Chip kind="outcome" value={c.last_outcome} />
+              {c.last_call_flags.map((f) => <span key={f}> <Chip kind="reason" value={f} /></span>)}
+            </>
+          ) : <span className="muted">—</span>}
+        </div>
+      </div>
+
+      <div className="bank">
+        <div className="bank-head">
+          <span className="sc-label">Simulated bank</span>
+          <span className="muted small">The agent can't see this. It only learns if a charge works.</span>
+          <span className="spacer" />
+          {c.account_edited && c.default_balance != null && c.default_instrument_status && (
+            <button className="link small" disabled={acctBusy}
+              onClick={() => onAccount({ balance: c.default_balance!, instrument_status: c.default_instrument_status! })}>
+              Restore
+            </button>
+          )}
+        </div>
+        <div className="bank-row">
+          <div>
+            <div className="bank-bal num">{rupees(c.balance)}</div>
+            <div className={`small ${short > 0 ? 'bank-short' : 'bank-ok'}`}>
+              {short > 0 ? `${rupees(short)} short of the full amount` : 'Covers the full amount'}
+            </div>
+          </div>
+          <div className="bank-actions">
+            <button className="ghost sm" disabled={acctBusy} onClick={() => onAccount({ top_up: 500 })}>+₹500</button>
+            <button className="ghost sm" disabled={acctBusy} onClick={() => onAccount({ top_up: 1000 })}>+₹1,000</button>
+            <button className="ghost sm" disabled={acctBusy || c.balance === 0} onClick={() => onAccount({ balance: 0 })}>Empty</button>
+          </div>
+          <label className="small bank-card">
+            Card
+            <select value={c.instrument_status} disabled={acctBusy}
+              onChange={(e) => onAccount({ instrument_status: e.target.value as Customer['instrument_status'] })}>
+              {INSTRUMENT_STATUSES.map((s) => <option key={s} value={s}>{CARD_LABEL[s]}</option>)}
+            </select>
+          </label>
+        </div>
+      </div>
+
+      <div className="sc-foot">
+        <Chip kind="status" value={c.status} />
+        {c.open_attention_count > 0 && <span className="badge" title="Open items in Needs attention">{c.open_attention_count}</span>}
+        {c.open_attention_reasons.includes('do_not_call_request') && <span className="badge">asked not to call</span>}
+        <span className="spacer" />
+        <button disabled={busy === `web-${c.id}`} onClick={onBrowser}>Talk in browser</button>
+      </div>
+    </article>
   )
 }
 

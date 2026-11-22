@@ -79,6 +79,8 @@ def get_conn():
         db.init_schema(c)
         if c.execute("SELECT count(*) n FROM customers").fetchone()["n"] == 0:
             seed.reset(c)
+        else:
+            seed.backfill(c)
         _conn = c
     return _conn
 

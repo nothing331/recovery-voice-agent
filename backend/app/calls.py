@@ -69,8 +69,11 @@ def finalize_call(conn, call_id: int, messages: list, latency: dict | None = Non
     if row is not None and row["outcome"] is None:
         derived = derive_outcome(conn, call_id)
         if derived is None:
-            flagged = conn.execute("SELECT 1 FROM attention_items WHERE call_id=? LIMIT 1", (call_id,)).fetchone()
-            derived = "escalated" if flagged else "incomplete"
+            flags = {r[0] for r in conn.execute("SELECT reason FROM attention_items WHERE call_id=?", (call_id,))}
+            if flags == {"callback_requested"}:
+                derived = "callback"
+            else:
+                derived = "escalated" if flags else "incomplete"
         conn.execute("UPDATE calls SET outcome=? WHERE id=?", (derived, call_id))
     conn.execute(
         "UPDATE calls SET transcript_json=?, status='completed', "

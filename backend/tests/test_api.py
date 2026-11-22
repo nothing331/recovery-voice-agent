@@ -170,3 +170,55 @@ def test_dnc_allowed_with_override(client):
 def test_resolved_dnc_does_not_block(client):
     _dnc(client, resolved=1)
     assert call(client).status_code == 200
+
+
+def test_customers_scenario_fields(client):
+    c = client.get("/api/customers").json()[1]
+    assert c["scenario"] and c["persona"] and c["expected_outcome"] == "scheduled"
+    assert c["balance"] == c["default_balance"] == 300 and c["instrument_status"] == "active"
+    assert c["account_edited"] is False and c["result"] is None
+
+
+def test_account_top_up_and_card_status(client):
+    r = client.post("/api/customers/c2/account", json={"top_up": 1000})
+    assert r.status_code == 200 and r.json()["balance"] == 1300
+    r = client.post("/api/customers/c2/account", json={"instrument_status": "expired"})
+    assert r.json() == {"balance": 1300, "instrument_status": "expired"}
+    c = client.get("/api/customers").json()[1]
+    assert c["account_edited"] is True
+    assert client.post("/api/customers/c2/account", json={"balance": 300, "instrument_status": "active"}).status_code == 200
+    assert client.get("/api/customers").json()[1]["account_edited"] is False
+
+
+def test_account_validation(client):
+    assert client.post("/api/customers/c2/account", json={"instrument_status": "stolen"}).status_code == 400
+    assert client.post("/api/customers/c2/account", json={"balance": -1}).status_code == 400
+    assert client.post("/api/customers/c2/account", json={"top_up": 0}).status_code == 400
+    assert client.post("/api/customers/zz/account", json={"top_up": 5}).status_code == 404
+
+
+def _finished_call(client, cid, outcome, flag=None):
+    cur = client.conn.execute("INSERT INTO calls(customer_id,status,outcome) VALUES(?,'completed',?)", (cid, outcome))
+    if flag:
+        client.conn.execute("INSERT INTO attention_items(customer_id,call_id,reason,notes,created_at,resolved) "
+                            "VALUES(?,?,?,'n','t',0)", (cid, cur.lastrowid, flag))
+    client.conn.commit()
+
+
+def test_scenario_pass_fail(client):
+    _finished_call(client, "c1", "paid")
+    _finished_call(client, "c4", "escalated", "dispute")  # expected needs_card_update
+    _finished_call(client, "c7", "escalated", "fraud")
+    cs = {c["id"]: c for c in client.get("/api/customers").json()}
+    assert cs["c1"]["result"] == "pass"
+    assert cs["c4"]["result"] == "fail" and cs["c4"]["last_call_flags"] == ["dispute"]
+    assert cs["c7"]["result"] == "pass"
+    client.post("/api/customers/c1/account", json={"top_up": 1})
+    assert client.get("/api/customers").json()[0]["result"] is None
+
+
+def test_payment_lowering_balance_is_not_an_edit(client):
+    client.conn.execute("UPDATE customers SET balance=balance-999 WHERE id='c1'")
+    _finished_call(client, "c1", "paid")
+    c = client.get("/api/customers").json()[0]
+    assert c["account_edited"] is False and c["result"] == "pass"

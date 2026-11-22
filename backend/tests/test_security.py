@@ -53,8 +53,39 @@ def test_tunnel_allows_plivo_paths(client):
     assert r.status_code == 403  # reached the handler (signature check), not the 404 guard
 
 
+def test_dashboard_password_guards_everything_but_plivo(client, monkeypatch):
+    import base64
+
+    monkeypatch.setattr(settings, "dashboard_password", "s3cret")
+
+    def basic(pw):
+        return {"authorization": "Basic " + base64.b64encode(f"admin:{pw}".encode()).decode()}
+
+    # Any host, including a spoofed localhost, needs the password.
+    for hdr in ({}, {"host": "localhost:8000"}, {"host": "x.hf.space"}, basic("wrong"), {"authorization": "Basic !!"}):
+        r = client.get("/api/customers", headers=hdr)
+        assert r.status_code == 401 and r.headers["www-authenticate"].startswith("Basic")
+    ok = {"host": "x.hf.space", **basic("s3cret")}
+    assert client.get("/api/customers", headers=ok).status_code == 200
+    assert client.get("/health", headers={"host": "x.hf.space"}).status_code == 200  # host health checks
+    # Plivo stays reachable without the password (its own signature check applies).
+    r = client.post("/plivo/hangup?call_id=1", headers={"host": "x.hf.space"}, data={"CallStatus": "completed"})
+    assert r.status_code == 403
+
+
+def test_public_base_url_falls_back_to_render_url(monkeypatch):
+    from app.config import Settings
+
+    monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://x.onrender.com")
+    monkeypatch.delenv("PUBLIC_BASE_URL", raising=False)
+    assert Settings(_env_file=None).public_base_url == "https://x.onrender.com"
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://tunnel.example")
+    assert Settings(_env_file=None).public_base_url == "https://tunnel.example"
+
+
 def test_dev_test_call_removed(client):
-    assert client.post("/dev/test-call", json={"to_number": "+1"}).status_code == 404
+    # 405 when the built dashboard is mounted at / (StaticFiles is GET-only); either way, no endpoint.
+    assert client.post("/dev/test-call", json={"to_number": "+1"}).status_code in (404, 405)
 
 
 # ---- signatures ----
