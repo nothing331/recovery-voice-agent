@@ -12,3 +12,4 @@ def _no_livekit_from_env(monkeypatch):
     from app.config import settings
 
     monkeypatch.setattr(settings, "livekit_url", "")
+    monkeypatch.setattr(settings, "dashboard_password", "")  # a local .env may set one for the laptop link

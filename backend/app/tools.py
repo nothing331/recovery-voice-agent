@@ -65,12 +65,36 @@ class CallSession:
         charged, sched, _ = ledger(self.conn, self.customer_id)
         return self._customer()["amount_due"] - charged - sched
 
+    def _arrangement(self, before_this_call: bool = False) -> dict | None:
+        """Payment decision already on the account (from any call, or only earlier calls)."""
+        q = "SELECT kind, amount, date FROM payment_attempts WHERE customer_id=? AND (kind='scheduled' OR result='success')"
+        args = [self.customer_id]
+        if before_this_call:
+            q += " AND (call_id IS NULL OR call_id != ?)"
+            args.append(self.call_id)
+        rows = self.conn.execute(q + " ORDER BY id", args).fetchall()
+        if not rows and self._customer()["status"] != "paid":
+            return None
+        paid = sum(r["amount"] for r in rows if r["kind"] != "scheduled")
+        scheduled = [{"amount": r["amount"], "date": r["date"]} for r in rows if r["kind"] == "scheduled"]
+        parts = []
+        if paid:
+            parts.append(f"{paid} rupees already paid")
+        parts += [f"{x['amount']} rupees scheduled for {x['date']}" for x in scheduled]
+        return {"paid": paid, "scheduled": scheduled,
+                "summary": "; ".join(parts) or "the account is already marked paid"}
+
     def _resolved(self):
         """Backend gate: one payment decision per case."""
         _, _, has_schedule = ledger(self.conn, self.customer_id)
         if self._customer()["status"] == "paid" or has_schedule or self._remaining() <= 0:
-            return {"error": "already_resolved",
-                    "message": "This account already has a payment decision (paid or a debit scheduled). Do not charge or schedule again; confirm the existing arrangement and end the call, or flag_for_human if the customer wants a change."}
+            arr = self._arrangement()
+            what = arr["summary"] if arr else "a payment decision is already recorded"
+            return {"error": "already_resolved", "existing_arrangement": arr,
+                    "message": f"Not a system error: this account already has an arrangement ({what}). "
+                               "Do not charge or schedule again, and do not tell the customer something went wrong. "
+                               "Tell them the existing arrangement, then end the call. If they want to change it, "
+                               "call flag_for_human with reason wants_human and their requested change."}
         return None
 
     @staticmethod
@@ -109,8 +133,14 @@ class CallSession:
         self.conn.execute("UPDATE calls SET identity_result='confirmed' WHERE id=?", (self.call_id,))
         self.conn.commit()
         c = self._customer()
-        return {"confirmed": True, "plan": c["plan"], "amount_due": c["amount_due"], "due_date": c["due_date"],
-                "failure_reason_plain": REASON_PLAIN.get(c["failure_reason"], c["failure_reason"])}
+        out = {"confirmed": True, "plan": c["plan"], "amount_due": c["amount_due"], "due_date": c["due_date"],
+               "failure_reason_plain": REASON_PLAIN.get(c["failure_reason"], c["failure_reason"])}
+        if (arr := self._arrangement()):
+            out["existing_arrangement"] = arr
+            out["message"] = (f"This account already has an arrangement from an earlier call: {arr['summary']}. "
+                              "Do not ask for payment. Remind the customer of it and end the call. If they want "
+                              "to change it, call flag_for_human with reason wants_human and their requested change.")
+        return out
 
     def retry_debit(self) -> dict:
         if (e := self._locked()):
@@ -220,6 +250,12 @@ class CallSession:
         if outcome not in OUTCOMES:
             return {"error": "invalid_outcome", "message": f"Outcome must be one of: {', '.join(OUTCOMES)}."}
         derived = derive_outcome(self.conn, self.call_id)
+        if outcome in FINANCIAL and derived is None and (arr := self._arrangement(before_this_call=True)):
+            # Confirming an arrangement made on an earlier call: no new payment on this call.
+            self.conn.execute("UPDATE calls SET outcome=?, disposition=?, summary=?, ended_at=? WHERE id=?",
+                              ("incomplete", "existing_arrangement", summary, _now(), self.call_id))
+            self.conn.commit()
+            return {"success": True, "note": f"No new payment on this call; existing arrangement: {arr['summary']}."}
         if outcome in FINANCIAL and outcome != derived:
             if derived:
                 msg = f"Ledger shows {derived}. Use {derived}."

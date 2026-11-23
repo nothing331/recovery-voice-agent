@@ -170,9 +170,9 @@ def test_offer_unknown_expired_and_reused_sessions(client, monkeypatch):
     assert _offer(client, "nope").status_code == 404
     u = client.post("/api/browser-session", json={"customer_id": "c1"}).json()["url"]
     sid = _start(client, u).json()["sessionId"]
-    monkeypatch.setattr(store, "_now", lambda: 10**9)  # past the 5 minute expiry
-    assert _offer(client, sid).status_code == 404
-    monkeypatch.undo()
+    with monkeypatch.context() as m:
+        m.setattr(store, "_now", lambda: 10**9)  # past the 5 minute expiry
+        assert _offer(client, sid).status_code == 404
     u = client.post("/api/browser-session", json={"customer_id": "c2"}).json()["url"]
     sid = _start(client, u).json()["sessionId"]
     store.browser_sessions[sid]["used"] = True

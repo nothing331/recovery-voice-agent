@@ -385,3 +385,29 @@ def test_backfill_old_database_keeps_calls():
     r = c.execute("SELECT * FROM customers WHERE id='c2'").fetchone()
     assert r["balance"] == 300 and r["instrument_status"] == "active" and r["scenario"]
     assert c.execute("SELECT count(*) FROM calls").fetchone()[0] == 1
+
+
+def test_repeat_call_sees_existing_arrangement_and_can_end_cleanly(conn):
+    s = make(conn, "c2")
+    s.confirm_identity(True)
+    assert s.take_partial_payment(149, iso(5))["success"] is True
+    s.end_call("partial_paid_and_scheduled", "paid part")
+    s2 = make(conn, "c2")
+    r = s2.confirm_identity(True)
+    arr = r["existing_arrangement"]
+    assert arr["paid"] == 149 and arr["scheduled"][0]["date"] == iso(5)
+    assert "earlier call" in r["message"]
+    e = s2.schedule_debit(iso(3))
+    assert e["error"] == "already_resolved" and "Not a system error" in e["message"]
+    assert e["existing_arrangement"]["paid"] == 149
+    # the agent may wrap up with the arrangement's outcome; no new payment is recorded for this call
+    assert s2.end_call("scheduled", "confirmed existing plan")["success"] is True
+    row = conn.execute("SELECT outcome, disposition FROM calls WHERE id=?", (s2.call_id,)).fetchone()
+    assert row["outcome"] == "incomplete" and row["disposition"] == "existing_arrangement"
+    assert len(attempts(conn)) == 2
+
+
+def test_first_call_has_no_existing_arrangement(conn):
+    s = make(conn, "c2")
+    assert "existing_arrangement" not in s.confirm_identity(True)
+    assert s.end_call("scheduled", "x")["error"] == "outcome_mismatch"
