@@ -222,3 +222,38 @@ def test_payment_lowering_balance_is_not_an_edit(client):
     _finished_call(client, "c1", "paid")
     c = client.get("/api/customers").json()[0]
     assert c["account_edited"] is False and c["result"] == "pass"
+
+
+def _past_call(conn, minutes, cid="c2"):
+    from datetime import datetime, timedelta, timezone
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(minutes=minutes)
+    conn.execute("INSERT INTO calls(customer_id,to_number,channel,status,started_at,ended_at) "
+                 "VALUES(?,?,?,?,?,?)", (cid, "browser", "browser", "completed",
+                                         start.isoformat(), end.isoformat()))
+    conn.commit()
+
+
+def test_monthly_minutes_cap_blocks_new_calls(client, monkeypatch):
+    monkeypatch.setattr(settings, "monthly_call_minutes_cap", 10)
+    _past_call(client.conn, 6)
+    assert client.post("/api/browser-session", json={"customer_id": "c1"}).status_code == 200
+    client.conn.execute("UPDATE calls SET status='completed', ended_at=started_at WHERE status='queued'")
+    _past_call(client.conn, 4)
+    r = client.post("/api/browser-session", json={"customer_id": "c1"})
+    assert r.status_code == 429 and "limit" in r.json()["detail"]
+    assert call(client).status_code == 429 and client.placed == []
+
+
+def test_minutes_counted_generously(client):
+    _past_call(client.conn, 0)  # a zero-length call still counts as one minute
+    _past_call(client.conn, 2.5)
+    assert calls.minutes_used_this_month(client.conn) == pytest.approx(3.5)
+
+
+def test_only_one_call_at_a_time(client):
+    assert client.post("/api/browser-session", json={"customer_id": "c1"}).status_code == 200
+    assert client.post("/api/browser-session", json={"customer_id": "c2"}).status_code == 200  # unopened link
+    client.conn.execute("UPDATE calls SET status='in_progress' WHERE customer_id='c1'")
+    r = client.post("/api/browser-session", json={"customer_id": "c3"})
+    assert r.status_code == 409 and "Another call" in r.json()["detail"]

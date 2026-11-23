@@ -42,12 +42,24 @@ def _customer_or_404(conn, customer_id: str):
     return c
 
 
+def _check_free_limits(conn) -> None:
+    """Keep usage inside free tiers: one call at a time and a monthly minutes cap."""
+    if calls.live_call_count(conn) >= settings.max_concurrent_calls:
+        raise HTTPException(409, "Another call is in progress. Wait for it to end.")
+    used = calls.minutes_used_this_month(conn)
+    if used >= settings.monthly_call_minutes_cap:
+        logger.warning(f"monthly call-minute cap reached: {used:.0f}/{settings.monthly_call_minutes_cap}")
+        raise HTTPException(429, f"Free-tier guard: this month's call limit "
+                                 f"({settings.monthly_call_minutes_cap} min) is used up.")
+
+
 def _check_callable(conn, customer_id: str, override_do_not_call: bool = False):
     c = _customer_or_404(conn, customer_id)
     if c["debits_blocked"]:
         raise HTTPException(409, "Debits are blocked for this customer (fraud flag). Do not call.")
     if calls.has_active_call(conn, customer_id):
         raise HTTPException(409, "A call is already in progress for this customer.")
+    _check_free_limits(conn)
     dnc_open = conn.execute(
         "SELECT 1 FROM attention_items WHERE customer_id=? AND reason='do_not_call_request' AND resolved=0 LIMIT 1",
         (customer_id,)).fetchone()

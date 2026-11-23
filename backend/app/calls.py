@@ -31,6 +31,40 @@ def has_active_call(conn, customer_id: str) -> bool:
     return row is not None
 
 
+def _parse(ts: str | None) -> datetime | None:
+    try:
+        return datetime.fromisoformat(ts) if ts else None
+    except ValueError:
+        return None
+
+
+def minutes_used_this_month(conn) -> float:
+    """Call minutes since the start of this UTC month, counted generously: each call is at least
+    one minute, and an unfinished call counts until now (capped at STALE_AFTER)."""
+    now = datetime.now(timezone.utc)
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    rows = conn.execute(
+        "SELECT started_at, ended_at, status FROM calls WHERE started_at >= ? AND status != 'failed'",
+        (month_start.isoformat(),),
+    ).fetchall()
+    total = 0.0
+    for r in rows:
+        start = _parse(r["started_at"])
+        if start is None:
+            continue
+        end = _parse(r["ended_at"]) or min(now, start + STALE_AFTER)
+        total += max(1.0, (end - start).total_seconds() / 60)
+    return total
+
+
+def live_call_count(conn) -> int:
+    """Calls actually using minutes (ringing or connected); an unopened browser link doesn't count."""
+    cutoff = (datetime.now(timezone.utc) - STALE_AFTER).isoformat()
+    return conn.execute(
+        "SELECT COUNT(*) FROM calls WHERE status IN ('ringing','in_progress') AND started_at > ?", (cutoff,)
+    ).fetchone()[0]
+
+
 def derive_outcome(conn, call_id: int) -> str | None:
     """Financial outcome of a call, derived from its payment_attempts rows."""
     rows = conn.execute("SELECT kind, result FROM payment_attempts WHERE call_id=?", (call_id,)).fetchall()

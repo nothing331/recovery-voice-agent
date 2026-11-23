@@ -39,7 +39,7 @@ from app.config import settings
 from app.prompt import build_system_prompt
 from app.tools import TOOL_SCHEMAS, CallSession
 
-MAX_CALL_SECONDS = 8 * 60
+MAX_CALL_SECONDS = settings.max_call_minutes * 60  # free-tier guard
 GOODBYE = "Thank you for your time. Take care, goodbye."
 
 HELLO_PROMPT = (

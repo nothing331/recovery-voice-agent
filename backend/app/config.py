@@ -44,6 +44,12 @@ class Settings(BaseSettings):
     log_level: str = "DEBUG"
     smart_turn: bool = True
 
+    # Free-tier guardrails. Each call uses ~2 participant minutes on LiveKit (bot + caller), so the
+    # monthly cap stays far below free limits (e.g. 1,000 minutes). New calls are refused once reached.
+    monthly_call_minutes_cap: int = 300
+    max_call_minutes: int = 8
+    max_concurrent_calls: int = 1
+
     @property
     def livekit_enabled(self) -> bool:
         return bool(self.livekit_url and self.livekit_api_key and self.livekit_api_secret)
