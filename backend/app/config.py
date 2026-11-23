@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     livekit_api_key: str = ""
     livekit_api_secret: str = ""
 
+    # Small hosts (Render free: 0.15 CPU) can't keep up with per-frame DEBUG logging or the
+    # Smart Turn end-of-turn model; set LOG_LEVEL=INFO and SMART_TURN=false there.
+    log_level: str = "DEBUG"
+    smart_turn: bool = True
+
     @property
     def livekit_enabled(self) -> bool:
         return bool(self.livekit_url and self.livekit_api_key and self.livekit_api_secret)

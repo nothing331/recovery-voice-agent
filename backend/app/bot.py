@@ -5,6 +5,8 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from loguru import logger
+from pipecat.turns.user_stop.speech_timeout_user_turn_stop_strategy import SpeechTimeoutUserTurnStopStrategy
+from pipecat.turns.user_turn_strategies import UserTurnStrategies
 
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.adapters.llm.schemas.function_schema import FunctionSchema
@@ -100,6 +102,16 @@ class _BotStoppedObserver(BaseObserver):
             await self._on_stopped()
 
 
+def _user_params() -> LLMUserAggregatorParams:
+    """VAD-based turns; Smart Turn decides end of turn unless disabled for small hosts."""
+    if settings.smart_turn:
+        return LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer())
+    return LLMUserAggregatorParams(
+        vad_analyzer=SileroVADAnalyzer(),
+        user_turn_strategies=UserTurnStrategies(stop=[SpeechTimeoutUserTurnStopStrategy()]),
+    )
+
+
 async def run_bot(transport, call_id: int | None, sample_rate: int = 8000) -> None:
     conn = store.get_conn()
     row = None
@@ -132,7 +144,7 @@ async def run_bot(transport, call_id: int | None, sample_rate: int = 8000) -> No
     context = LLMContext(tools=_tools_schema()) if session else LLMContext()
     user_agg, assistant_agg = LLMContextAggregatorPair(
         context,
-        user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer()),
+        user_params=_user_params(),
     )
 
     pipeline = Pipeline(
@@ -207,6 +219,24 @@ async def run_bot(transport, call_id: int | None, sample_rate: int = 8000) -> No
 
     timeout_task: asyncio.Task | None = None
     connected = False
+    # The client can connect before the pipeline has started (a LiveKit browser often joins the
+    # room first, and a slow host starts the pipeline late). Frames queued before StartFrame reaches
+    # the end of the pipeline are lost, so the opening turn waits for this.
+    pipeline_ready = asyncio.Event()
+    background: set[asyncio.Task] = set()
+
+    @worker.event_handler("on_pipeline_started")
+    async def on_pipeline_started(worker, frame):
+        pipeline_ready.set()
+
+    async def when_ready(coro):
+        await pipeline_ready.wait()
+        await coro
+
+    def after_start(coro):
+        t = asyncio.create_task(when_ready(coro))
+        background.add(t)
+        t.add_done_callback(background.discard)
 
     @transport.event_handler("on_client_connected")
     async def on_connected(transport, client):
@@ -224,7 +254,7 @@ async def run_bot(transport, call_id: int | None, sample_rate: int = 8000) -> No
             conn.commit()
             timeout_task = asyncio.create_task(safety_timeout())
             if call_id in store.voicemail_calls:
-                await leave_voicemail()
+                after_start(leave_voicemail())
                 return
             store.voicemail_hooks[call_id] = leave_voicemail
             context.add_message({"role": "user", "content": "[call connected] The person has picked up. Begin."})
@@ -236,7 +266,7 @@ async def run_bot(transport, call_id: int | None, sample_rate: int = 8000) -> No
                     f"{settings.company_name}. Can you hear me clearly?",
                 }
             )
-        await worker.queue_frames([LLMRunFrame()])
+        after_start(worker.queue_frames([LLMRunFrame()]))
 
     @transport.event_handler("on_client_disconnected")
     async def on_disconnected(transport, client):
@@ -248,6 +278,8 @@ async def run_bot(transport, call_id: int | None, sample_rate: int = 8000) -> No
     finally:
         if timeout_task:
             timeout_task.cancel()
+        for t in list(background):
+            t.cancel()
         logger.info(latency.summary_line())
         if session:
             store.voicemail_hooks.pop(call_id, None)

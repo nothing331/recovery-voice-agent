@@ -31,3 +31,8 @@ services:
         value: aura-2-thalia-en
       - key: PLIVO_VERIFY_SIGNATURES
         value: "true"
+      # The free plan has 0.15 CPU: skip per-frame DEBUG logs and the Smart Turn model.
+      - key: LOG_LEVEL
+        value: INFO
+      - key: SMART_TURN
+        value: "false"

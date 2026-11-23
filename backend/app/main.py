@@ -1,15 +1,21 @@
 import base64
 import secrets
+import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
 from fastapi import FastAPI
+from loguru import logger
 from starlette.responses import PlainTextResponse
 from starlette.staticfiles import StaticFiles
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from app import api, livekit_call, telephony
 from app.config import settings
+
+logger.remove()
+logger.add(sys.stderr, level=settings.log_level.upper())
+
+from app import api, livekit_call, telephony  # noqa: E402
 
 try:
     from pipecat_ai_prebuilt.frontend import PipecatPrebuiltUI
