@@ -190,13 +190,14 @@ def test_second_call_cannot_schedule_again(conn):
     assert len(attempts(conn)) == 1
 
 
-def test_partial_schedule_blocks_further_schedule_and_amount_capped(conn):
+def test_schedule_must_cover_full_amount(conn):
+    # A part-schedule would leave the rest with no plan and lock every later tool.
     s = make(conn, "c2")
     s.confirm_identity(True)
-    assert s.schedule_debit(iso(2), 500)["success"] is True
-    s2 = make(conn, "c2")
-    s2.confirm_identity(True)
-    assert s2.schedule_debit(iso(2), 500)["error"] == "already_resolved"
+    r = s.schedule_debit(iso(2), 500)
+    assert r["error"] == "invalid_amount" and "take_partial_payment" in r["message"]
+    assert len(attempts(conn)) == 0
+    assert s.schedule_debit(iso(2), r["remaining"])["success"] is True
 
 
 def test_schedule_amount_capped_to_remaining(conn):
@@ -256,7 +257,7 @@ def test_end_call_mismatch(conn):
     s = make(conn, "c3")
     s.confirm_identity(True)
     r = s.end_call("paid", "x")
-    assert r["error"] == "outcome_mismatch" and r["message"].startswith("Ledger shows")
+    assert r["error"] == "outcome_mismatch" and "No payment was made" in r["message"]
     assert conn.execute("SELECT outcome FROM calls WHERE id=?", (s.call_id,)).fetchone()[0] is None
     s.schedule_debit(iso(1))
     r = s.end_call("paid", "x")
@@ -411,3 +412,42 @@ def test_first_call_has_no_existing_arrangement(conn):
     s = make(conn, "c2")
     assert "existing_arrangement" not in s.confirm_identity(True)
     assert s.end_call("scheduled", "x")["error"] == "outcome_mismatch"
+
+
+def test_expired_card_guidance_and_no_schedule(conn):
+    s = make(conn, "c4")  # seeded with an expired card
+    r = s.confirm_identity(True)
+    assert r["card_usable"] is False and "needs_card_update" in r["message"]
+    e = s.schedule_debit(iso(1))
+    assert e["error"] == "card_unusable" and "Not a system error" in e["message"]
+    assert conn.execute("SELECT count(*) FROM payment_attempts WHERE kind='scheduled'").fetchone()[0] == 0
+    assert "needs_card_update" in s.retry_debit()["message"]
+
+
+def test_success_messages_name_the_outcome_that_end_call_accepts(conn):
+    s = make(conn, "c3")
+    s.confirm_identity(True)
+    r = s.take_partial_payment(500, iso(2))
+    assert "outcome partial_paid_and_scheduled" in r["message"]
+    assert s.end_call("partial_paid_and_scheduled", "x")["success"] is True
+    s2 = make(conn, "c2")
+    s2.confirm_identity(True)
+    r = s2.schedule_debit(iso(1))
+    assert "outcome scheduled" in r["message"] and s2.end_call("scheduled", "x")["success"] is True
+
+
+def test_failed_retry_says_it_is_the_bank_not_a_fault(conn):
+    s = make(conn, "c2")
+    s.confirm_identity(True)
+    r = s.retry_debit()
+    assert r["success"] is False and "not a system error" in r["message"]
+
+
+def test_blocked_account_message_gives_outcome(conn):
+    s = make(conn, "c2")
+    s.confirm_identity(True)
+    conn.execute("UPDATE customers SET debits_blocked=1 WHERE id='c2'")
+    conn.commit()
+    e = s.schedule_debit(iso(1))
+    assert e["error"] == "debits_blocked" and "outcome escalated" in e["message"]
+    assert s.end_call("escalated", "x")["success"] is True

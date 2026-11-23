@@ -107,8 +107,21 @@ class CallSession:
                     "message": "Identity is not confirmed. Share no account details; ask for the customer by name and call confirm_identity."}
         if self._customer()["debits_blocked"]:
             return {"error": "debits_blocked",
-                    "message": "Debits are blocked for this customer. Do not take payment; wrap up politely."}
+                    "message": "Not a system error: payments are on hold for this account while the team reviews it. "
+                               "Do not take payment. Tell the customer the team will contact them, then end_call "
+                               "with outcome escalated."}
         return None
+
+    def _card_problem(self) -> str | None:
+        """'card_expired' / 'card_lost' when the card on file can't be charged, else None."""
+        inst = self._customer()["instrument_status"] or "active"
+        return None if inst == "active" else {"expired": "card_expired", "lost": "card_lost"}.get(inst, "bank_decline")
+
+    def _card_error(self, problem: str) -> dict:
+        return {"error": "card_unusable", "reason": problem,
+                "message": f"Not a system error: {REASON_PLAIN.get(problem, problem)}, so no payment can be taken "
+                           "or scheduled on it. Explain that plainly, do not ask for card details, call "
+                           "flag_for_human with reason needs_card_update, then end_call with outcome escalated."}
 
     def _date_error(self, d):
         code = validate_schedule_date(d, self.today)
@@ -135,6 +148,11 @@ class CallSession:
         c = self._customer()
         out = {"confirmed": True, "plan": c["plan"], "amount_due": c["amount_due"], "due_date": c["due_date"],
                "failure_reason_plain": REASON_PLAIN.get(c["failure_reason"], c["failure_reason"])}
+        if (problem := self._card_problem()) and not self._arrangement():
+            out["card_usable"] = False
+            out["message"] = (f"The card on file cannot be charged ({REASON_PLAIN.get(problem, problem)}). Do not offer "
+                              "retry, schedule or partial payment. Explain, call flag_for_human with reason "
+                              "needs_card_update, then end_call with outcome escalated.")
         if (arr := self._arrangement()):
             out["existing_arrangement"] = arr
             out["message"] = (f"This account already has an arrangement from an earlier call: {arr['summary']}. "
@@ -164,21 +182,30 @@ class CallSession:
             return self._failed(e)
         if ok:
             return {"success": True, "amount": amount,
-                    "message": "Payment went through. Confirm it to the customer, thank them and end the call."}
+                    "message": "Payment went through. Confirm it in one sentence, then end_call with outcome paid."}
+        if reason in ("card_expired", "card_lost"):
+            return {"success": False, "reason": reason, **{k: v for k, v in self._card_error(reason).items()
+                                                            if k == "message"}}
         return {"success": False, "reason": reason,
-                "message": f"The retry failed ({REASON_PLAIN.get(reason, reason)}). Do not retry again unless the customer says they have just added money or fixed their card. Otherwise offer to schedule the debit within 5 days, a partial payment, or flag for a human if the card is unusable."}
+                "message": f"The retry did not go through ({REASON_PLAIN.get(reason, reason)}). This is the bank's answer, not a system error. Do not retry again unless the customer says they have just added money. Otherwise offer to schedule the debit within 5 days or a partial payment."}
 
     def schedule_debit(self, date: str, amount: int | None = None) -> dict:
         if (e := self._locked()):
             return e
         if (e := self._resolved()):
             return e
+        if (problem := self._card_problem()):
+            return self._card_error(problem)
         remaining = self._remaining()
         if amount is None:
             amount = remaining
-        if not isinstance(amount, int) or isinstance(amount, bool) or not 0 < amount <= remaining:
-            return {"error": "invalid_amount",
-                    "message": f"Amount must be between 1 and {remaining} rupees."}
+        if not isinstance(amount, int) or isinstance(amount, bool) or amount != remaining:
+            # One payment decision per case: a schedule must cover everything still owed, otherwise
+            # the rest would be left with no plan and every later tool would refuse.
+            return {"error": "invalid_amount", "remaining": remaining,
+                    "message": f"schedule_debit must cover the full outstanding {remaining} rupees. To pay part now "
+                               "and the rest later use take_partial_payment. To split it across two future dates, "
+                               "call flag_for_human with reason wants_human."}
         if (e := self._date_error(date)):
             return e
         try:
@@ -191,7 +218,7 @@ class CallSession:
         except Exception as e:
             return self._failed(e)
         return {"success": True, "amount": amount, "date": date,
-                "message": f"Debit of {amount} rupees is scheduled for {date}. Confirm this with the customer and end the call."}
+                "message": f"Debit of {amount} rupees is scheduled for {date}. Confirm it in one sentence, then end_call with outcome scheduled."}
 
     def take_partial_payment(self, amount_now: int, rest_date: str) -> dict:
         if (e := self._locked()):
@@ -217,10 +244,12 @@ class CallSession:
         except Exception as e:
             return self._failed(e)
         if not ok:
+            if reason in ("card_expired", "card_lost"):
+                return {"success": False, "reason": reason, "message": self._card_error(reason)["message"]}
             return {"success": False, "reason": reason,
-                    "message": f"The partial charge failed ({REASON_PLAIN.get(reason, reason)}). Offer to schedule the full amount within 5 days instead."}
+                    "message": f"The partial charge did not go through ({REASON_PLAIN.get(reason, reason)}). This is the bank's answer, not a system error. Nothing was charged or scheduled. Offer to schedule the full amount within 5 days instead."}
         return {"success": True, "paid_now": amount_now, "remaining": rest, "rest_date": rest_date,
-                "message": f"Charged {amount_now} rupees now; remaining {rest} rupees scheduled for {rest_date}. Confirm both with the customer and end the call."}
+                "message": f"Charged {amount_now} rupees now; remaining {rest} rupees scheduled for {rest_date}. Confirm both in one sentence, then end_call with outcome partial_paid_and_scheduled."}
 
     def flag_for_human(self, reason: str, notes: str) -> dict:
         if reason not in FLAG_REASONS:
@@ -244,7 +273,7 @@ class CallSession:
         return {"success": True,
                 "message": ("Callback noted. Confirm the time with the customer, then end the call with outcome callback."
                             if reason == "callback_requested" else
-                            "Flagged for the team. Tell the customer someone will follow up, then end the call politely.")}
+                            "Flagged for the team. Tell the customer someone will follow up, then end_call (outcome escalated, unless a payment was already made on this call).")}
 
     def end_call(self, outcome: str, summary: str) -> dict:
         if outcome not in OUTCOMES:
@@ -260,7 +289,9 @@ class CallSession:
             if derived:
                 msg = f"Ledger shows {derived}. Use {derived}."
             else:
-                msg = "Ledger shows no payment. Use escalated, voicemail, no_answer or incomplete."
+                msg = ("No payment was made or scheduled on this call, so a payment outcome can't be recorded. "
+                       "Use escalated if you flagged anything, callback for a callback, otherwise incomplete. "
+                       "This is bookkeeping only; do not mention it to the customer.")
             return {"error": "outcome_mismatch", "message": msg}
         self.conn.execute("UPDATE calls SET outcome=?, disposition=?, summary=?, ended_at=? WHERE id=?",
                           (derived or outcome, outcome, summary, _now(), self.call_id))
@@ -276,10 +307,10 @@ TOOL_SCHEMAS = [
      "description": "Retry the failed autopay debit now for the outstanding amount. At most twice per call: retry a second time only if the customer says they have just added money or fixed their card. Do not use when the customer says the balance is low.",
      "parameters": {"type": "object", "properties": {}}},
     {"name": "schedule_debit",
-     "description": "Schedule the debit for a date at most 5 days from today (today counts as day 0). Amount defaults to the full outstanding amount.",
+     "description": "Schedule the full outstanding amount for a date at most 5 days from today (today counts as day 0). For part now and the rest later, use take_partial_payment instead.",
      "parameters": {"type": "object", "properties": {
          "date": {"type": "string", "description": "ISO date YYYY-MM-DD, IST, between today and today+5."},
-         "amount": {"type": "integer", "description": "Amount in whole rupees. Optional; defaults to the outstanding amount."}},
+         "amount": {"type": "integer", "description": "Optional. If given it must equal the full outstanding amount."}},
          "required": ["date"]}},
     {"name": "take_partial_payment",
      "description": "Charge part of the amount now and schedule the rest within 5 days.",
@@ -294,7 +325,7 @@ TOOL_SCHEMAS = [
          "notes": {"type": "string", "description": "Brief note of what the person said and context. Required."}},
          "required": ["reason", "notes"]}},
     {"name": "end_call",
-     "description": "Record the call outcome and summary, then end the call. Call once, after saying goodbye.",
+     "description": "Record the call outcome and summary, then end the call. Call once, right after your one-sentence recap; do not say goodbye yourself, a short thank-you and goodbye is played automatically.",
      "parameters": {"type": "object", "properties": {
          "outcome": {"type": "string", "enum": OUTCOMES},
          "summary": {"type": "string", "description": "One or two sentences on what happened."}},

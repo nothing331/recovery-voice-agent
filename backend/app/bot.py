@@ -184,7 +184,9 @@ async def run_bot(transport, call_id: int | None, sample_rate: int = 8000) -> No
                 try:
                     result = getattr(session, name)(**args)
                 except TypeError as e:
-                    result = {"error": "bad_arguments", "message": str(e)}
+                    result = {"error": "bad_arguments",
+                              "message": f"Wrong arguments for {name} ({e}). Call it again with the arguments in its "
+                                         "schema. This is not something to mention to the customer."}
                 except Exception as e:  # never let a tool crash the call
                     logger.exception(f"call {call_id}: tool {name} failed")
                     result = {"error": "tool_failed", "message": str(e)}
