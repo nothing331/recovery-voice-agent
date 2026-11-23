@@ -155,7 +155,8 @@ def test_end_call(conn):
 
 def test_schemas():
     names = {t["name"] for t in TOOL_SCHEMAS}
-    assert names == {"confirm_identity", "retry_debit", "schedule_debit", "take_partial_payment", "flag_for_human", "end_call"}
+    assert names == {"confirm_identity", "retry_debit", "schedule_debit", "reschedule_debit", "take_partial_payment",
+                     "flag_for_human", "end_call"}
     assert all(t["parameters"]["type"] == "object" for t in TOOL_SCHEMAS)
 
 
@@ -451,3 +452,59 @@ def test_blocked_account_message_gives_outcome(conn):
     e = s.schedule_debit(iso(1))
     assert e["error"] == "debits_blocked" and "outcome escalated" in e["message"]
     assert s.end_call("escalated", "x")["success"] is True
+
+
+def test_history_given_after_identity(conn):
+    s = make(conn, "c2")
+    assert "history" not in s.confirm_identity(True)  # first call: nothing earlier
+    s.flag_for_human("callback_requested", "busy, call after 6pm")
+    s.end_call("callback", "Customer was driving; asked for a call after 6pm.")
+    s2 = make(conn, "c2")
+    assert "history" not in s2.confirm_identity(False)  # nothing shared without identity
+    r = s2.confirm_identity(True)
+    h = r["history"]
+    assert h["previous_calls"][0]["summary"].startswith("Customer was driving")
+    assert h["previous_calls"][0]["outcome"] == "callback"
+    assert h["open_flags"][0]["reason"] == "callback_requested" and "do not read it out" in r["history_note"]
+
+
+def test_reschedule_any_number_of_times_and_history_shows_moves(conn):
+    s = make(conn, "c2")
+    s.confirm_identity(True)
+    s.schedule_debit(iso(4))
+    s.end_call("scheduled", "scheduled")
+    for new in (iso(2), iso(5)):  # two later calls, each moving the date
+        s2 = make(conn, "c2")
+        r = s2.confirm_identity(True)
+        assert r["existing_arrangement"]["can_reschedule"] is True and "reschedule_debit" in r["message"]
+        m = s2.reschedule_debit(new)
+        assert m["success"] is True and m["new_date"] == new
+        assert s2.end_call("scheduled", "moved")["success"] is True  # derived outcome is scheduled
+    arr = make(conn, "c2")._arrangement()
+    assert arr["scheduled"] == [{"amount": 1499, "date": iso(5)}] and arr["reschedules_used"] == 2
+    assert f"rescheduled from {iso(2)} to {iso(5)}" in arr["summary"]
+    # still one plan: the ledger total is unchanged
+    assert conn.execute("SELECT SUM(amount) FROM payment_attempts WHERE kind='scheduled'").fetchone()[0] == 1499
+
+
+def test_reschedule_rules(conn):
+    s = make(conn, "c2")
+    s.confirm_identity(True)
+    assert s.reschedule_debit(iso(1))["error"] == "nothing_scheduled"
+    s.schedule_debit(iso(2))
+    assert s.reschedule_debit(iso(6))["error"] == "date_out_of_range"
+    assert s.reschedule_debit(iso(2))["error"] == "same_date"
+    s3 = make(conn, "c3")
+    assert s3.reschedule_debit(iso(1))["error"] == "identity_not_confirmed"
+
+
+def test_partial_payment_only_once_but_rest_can_be_rescheduled(conn):
+    s = make(conn, "c3")
+    s.confirm_identity(True)
+    assert s.take_partial_payment(300, iso(3))["success"] is True
+    s.end_call("partial_paid_and_scheduled", "x")
+    s2 = make(conn, "c3")
+    s2.confirm_identity(True)
+    e = s2.take_partial_payment(100, iso(2))
+    assert e["error"] == "partial_already_used" and "only once" in e["message"]
+    assert s2.reschedule_debit(iso(1))["success"] is True

@@ -13,6 +13,7 @@ FINANCIAL = ("paid", "scheduled", "partial_paid_and_scheduled")
 OUTCOMES = ["paid", "scheduled", "partial_paid_and_scheduled", "escalated", "callback", "voicemail", "no_answer",
             "incomplete"]
 MAX_RETRIES_PER_CALL = 2
+HISTORY_CALLS = 3
 
 REASON_PLAIN = {
     "insufficient_funds": "there wasn't enough balance in the account at the time",
@@ -67,7 +68,8 @@ class CallSession:
 
     def _arrangement(self, before_this_call: bool = False) -> dict | None:
         """Payment decision already on the account (from any call, or only earlier calls)."""
-        q = "SELECT kind, amount, date FROM payment_attempts WHERE customer_id=? AND (kind='scheduled' OR result='success')"
+        q = ("SELECT kind, amount, date, created_at FROM payment_attempts "
+             "WHERE customer_id=? AND (kind='scheduled' OR result='success')")
         args = [self.customer_id]
         if before_this_call:
             q += " AND (call_id IS NULL OR call_id != ?)"
@@ -77,12 +79,47 @@ class CallSession:
             return None
         paid = sum(r["amount"] for r in rows if r["kind"] != "scheduled")
         scheduled = [{"amount": r["amount"], "date": r["date"]} for r in rows if r["kind"] == "scheduled"]
+        moves = self._reschedules()
         parts = []
         if paid:
             parts.append(f"{paid} rupees already paid")
         parts += [f"{x['amount']} rupees scheduled for {x['date']}" for x in scheduled]
-        return {"paid": paid, "scheduled": scheduled,
+        parts += [f"rescheduled from {m['prev_date']} to {m['date']} on {m['created_at'][:10]}" for m in moves]
+        made = rows[0]["created_at"][:10] if rows and rows[0]["created_at"] else None
+        if made:
+            parts.append(f"arranged on {made}")
+        return {"paid": paid, "scheduled": scheduled, "arranged_on": made,
+                "reschedules_used": len(moves), "can_reschedule": bool(scheduled),
                 "summary": "; ".join(parts) or "the account is already marked paid"}
+
+    def _reschedules(self) -> list:
+        return [dict(r) for r in self.conn.execute(
+            "SELECT date, prev_date, created_at FROM payment_attempts WHERE customer_id=? AND kind='reschedule' "
+            "ORDER BY id", (self.customer_id,))]
+
+    def _history(self) -> dict:
+        """Earlier calls and open flags for this customer: context only, never read out verbatim."""
+        calls = [
+            {"date": (r["started_at"] or "")[:10], "outcome": r["outcome"] or r["status"],
+             "summary": (r["summary"] or "")[:200]}
+            for r in self.conn.execute(
+                "SELECT started_at, outcome, status, summary FROM calls WHERE customer_id=? AND id != ? "
+                "AND (summary IS NOT NULL OR outcome IS NOT NULL) ORDER BY id DESC LIMIT ?",
+                (self.customer_id, self.call_id, HISTORY_CALLS))
+        ]
+        flags = [
+            {"reason": r["reason"], "date": (r["created_at"] or "")[:10], "notes": (r["notes"] or "")[:200]}
+            for r in self.conn.execute(
+                "SELECT reason, created_at, notes FROM attention_items WHERE customer_id=? AND resolved=0 "
+                "ORDER BY id DESC LIMIT 5", (self.customer_id,))
+        ]
+        return {"previous_calls": calls, "open_flags": flags}
+
+    def _change_hint(self, arr: dict | None) -> str:
+        if arr and arr.get("can_reschedule"):
+            return ("If they want a different date for the scheduled debit, use reschedule_debit. "
+                    "Any other change (amount, another partial payment): flag_for_human with reason wants_human.")
+        return "If they want to change it, call flag_for_human with reason wants_human and their requested change."
 
     def _resolved(self):
         """Backend gate: one payment decision per case."""
@@ -93,8 +130,7 @@ class CallSession:
             return {"error": "already_resolved", "existing_arrangement": arr,
                     "message": f"Not a system error: this account already has an arrangement ({what}). "
                                "Do not charge or schedule again, and do not tell the customer something went wrong. "
-                               "Tell them the existing arrangement, then end the call. If they want to change it, "
-                               "call flag_for_human with reason wants_human and their requested change."}
+                               "Tell them the existing arrangement, then end the call. " + self._change_hint(arr)}
         return None
 
     @staticmethod
@@ -156,8 +192,13 @@ class CallSession:
         if (arr := self._arrangement()):
             out["existing_arrangement"] = arr
             out["message"] = (f"This account already has an arrangement from an earlier call: {arr['summary']}. "
-                              "Do not ask for payment. Remind the customer of it and end the call. If they want "
-                              "to change it, call flag_for_human with reason wants_human and their requested change.")
+                              "Do not ask for payment. Remind the customer of it and end the call. "
+                              + self._change_hint(arr))
+        hist = self._history()
+        if hist["previous_calls"] or hist["open_flags"]:
+            out["history"] = hist
+            out["history_note"] = ("Context from earlier calls, for you only. Use it to avoid repeating questions "
+                                   "and to acknowledge what was already agreed; do not read it out.")
         return out
 
     def retry_debit(self) -> dict:
@@ -220,9 +261,47 @@ class CallSession:
         return {"success": True, "amount": amount, "date": date,
                 "message": f"Debit of {amount} rupees is scheduled for {date}. Confirm it in one sentence, then end_call with outcome scheduled."}
 
+    def reschedule_debit(self, new_date: str) -> dict:
+        if (e := self._locked()):
+            return e
+        row = self.conn.execute(
+            "SELECT id, amount, date FROM payment_attempts WHERE customer_id=? AND kind='scheduled' "
+            "ORDER BY id DESC LIMIT 1", (self.customer_id,)).fetchone()
+        if row is None:
+            return {"error": "nothing_scheduled",
+                    "message": "Not a system error: there is no scheduled debit to move. If money is still owed, "
+                               "use the normal options (retry, schedule or partial payment)."}
+        if (problem := self._card_problem()):
+            return self._card_error(problem)
+        if (e := self._date_error(new_date)):
+            return e
+        if new_date == row["date"]:
+            return {"error": "same_date", "message": f"The debit is already scheduled for {new_date}. Nothing to change."}
+        try:
+            with self._txn():
+                self.conn.execute("UPDATE payment_attempts SET date=? WHERE id=?", (new_date, row["id"]))
+                self.conn.execute(
+                    "INSERT INTO payment_attempts(customer_id,call_id,kind,amount,date,result,created_at,prev_date) "
+                    "VALUES(?,?,?,?,?,?,?,?)",
+                    (self.customer_id, self.call_id, "reschedule", row["amount"], new_date, "rescheduled", _now(),
+                     row["date"]))
+                self._promise(row["amount"], new_date, commit=False)
+        except Exception as e:
+            return self._failed(e)
+        return {"success": True, "amount": row["amount"], "old_date": row["date"], "new_date": new_date,
+                "message": f"Moved the {row['amount']} rupee debit from {row['date']} to {new_date}. "
+                           "Confirm it in one sentence, then end_call with outcome scheduled."}
+
     def take_partial_payment(self, amount_now: int, rest_date: str) -> dict:
         if (e := self._locked()):
             return e
+        if self.conn.execute("SELECT 1 FROM payment_attempts WHERE customer_id=? AND kind='partial' "
+                             "AND result='success' LIMIT 1", (self.customer_id,)).fetchone():
+            arr = self._arrangement()
+            return {"error": "partial_already_used", "existing_arrangement": arr,
+                    "message": "Not a system error: a partial payment can be made only once per account, and one "
+                               f"was already made ({arr['summary'] if arr else 'see the account'}). Do not take another. "
+                               + self._change_hint(arr)}
         if (e := self._resolved()):
             return e
         due = self._remaining()
@@ -312,6 +391,11 @@ TOOL_SCHEMAS = [
          "date": {"type": "string", "description": "ISO date YYYY-MM-DD, IST, between today and today+5."},
          "amount": {"type": "integer", "description": "Optional. If given it must equal the full outstanding amount."}},
          "required": ["date"]}},
+    {"name": "reschedule_debit",
+     "description": "Move an already scheduled debit (from this or an earlier call) to a new date within 5 days of today. Same amount. Can be used again on later calls; the date must always stay within 5 days of today.",
+     "parameters": {"type": "object", "properties": {
+         "new_date": {"type": "string", "description": "ISO date YYYY-MM-DD, between today and today+5."}},
+         "required": ["new_date"]}},
     {"name": "take_partial_payment",
      "description": "Charge part of the amount now and schedule the rest within 5 days.",
      "parameters": {"type": "object", "properties": {

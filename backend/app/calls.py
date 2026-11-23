@@ -69,7 +69,7 @@ def derive_outcome(conn, call_id: int) -> str | None:
     """Financial outcome of a call, derived from its payment_attempts rows."""
     rows = conn.execute("SELECT kind, result FROM payment_attempts WHERE call_id=?", (call_id,)).fetchall()
     ok = {r["kind"] for r in rows if r["result"] == "success"}
-    sched = any(r["kind"] == "scheduled" for r in rows)
+    sched = any(r["kind"] in ("scheduled", "reschedule") for r in rows)  # moving a debit = a scheduled outcome
     if "retry" in ok:
         return "paid"
     if "partial" in ok and sched:

@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS calls(
   identity_result TEXT, promise_amount INTEGER, promise_date TEXT, summary TEXT, transcript_json TEXT, latency_json TEXT, disposition TEXT);
 CREATE TABLE IF NOT EXISTS payment_attempts(
   id INTEGER PRIMARY KEY AUTOINCREMENT, customer_id TEXT REFERENCES customers(id), call_id INTEGER,
-  kind TEXT, amount INTEGER, date TEXT, result TEXT, created_at TEXT);
+  kind TEXT, amount INTEGER, date TEXT, result TEXT, created_at TEXT, prev_date TEXT);
 CREATE TABLE IF NOT EXISTS attention_items(
   id INTEGER PRIMARY KEY AUTOINCREMENT, customer_id TEXT REFERENCES customers(id), call_id INTEGER,
   reason TEXT, notes TEXT, created_at TEXT, resolved INTEGER DEFAULT 0, resolved_at TEXT);
@@ -37,6 +37,9 @@ def init_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE calls ADD COLUMN latency_json TEXT")
     if "disposition" not in cols:
         conn.execute("ALTER TABLE calls ADD COLUMN disposition TEXT")
+    pa = {r[1] for r in conn.execute("PRAGMA table_info(payment_attempts)")}
+    if "prev_date" not in pa:  # date a rescheduled debit was moved from
+        conn.execute("ALTER TABLE payment_attempts ADD COLUMN prev_date TEXT")
     cust = {r[1] for r in conn.execute("PRAGMA table_info(customers)")}
     for col, typ in CUSTOMER_MIGRATIONS:
         if col not in cust:  # an older recovery.db; seed.backfill fills the values
