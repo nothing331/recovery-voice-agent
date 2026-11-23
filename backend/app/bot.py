@@ -206,10 +206,16 @@ async def run_bot(transport, call_id: int | None, sample_rate: int = 8000) -> No
         await worker.cancel(reason="max call duration")
 
     timeout_task: asyncio.Task | None = None
+    connected = False
 
     @transport.event_handler("on_client_connected")
     async def on_connected(transport, client):
-        nonlocal timeout_task
+        nonlocal timeout_task, connected
+        # LiveKit can report the same participant twice (already in the room + the join event);
+        # start the conversation only once.
+        if connected:
+            return
+        connected = True
         logger.info(f"call {call_id}: client connected")
         if session:
             conn.execute(

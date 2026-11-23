@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Talk in browser</title>
+  <style>
+    :root { --bg: #f7f7f5; --card: #fff; --text: #1d1d1b; --muted: #6b6b66; --accent: #1f6feb; --danger: #c2372c; --line: #e3e3de; }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg: #141413; --card: #1e1e1c; --text: #ececea; --muted: #9b9b95; --accent: #4c8dff; --danger: #ff6b5e; --line: #2e2e2b; }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 16px;
+           background: var(--bg); color: var(--text); font: 16px/1.5 system-ui, -apple-system, sans-serif; }
+    .card { width: 100%; max-width: 420px; background: var(--card); border: 1px solid var(--line);
+            border-radius: 14px; padding: 28px; text-align: center; }
+    h1 { font-size: 20px; margin: 0 0 6px; }
+    #status { color: var(--muted); min-height: 24px; margin: 0 0 22px; }
+    button { font: inherit; font-weight: 600; border: 0; border-radius: 10px; padding: 12px 22px;
+             cursor: pointer; color: #fff; background: var(--accent); min-width: 160px; }
+    button.end { background: var(--danger); }
+    button:disabled { opacity: .5; cursor: default; }
+    .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px;
+           background: var(--muted); vertical-align: middle; }
+    .live .dot { background: #2ea043; }
+    .speaking .dot { background: var(--accent); }
+  </style>
+</head>
+<body>
+  <main class="card" id="card">
+    <h1>Talk in browser</h1>
+    <p id="status"><span class="dot"></span><span id="msg">Press Connect and allow the microphone.</span></p>
+    <button id="btn">Connect</button>
+  </main>
+  <script src="https://cdn.jsdelivr.net/npm/livekit-client@2.23.0/dist/livekit-client.umd.js"></script>
+  <script>
+    const { Room, RoomEvent, Track } = LivekitClient;
+    const sid = new URLSearchParams(location.search).get('sid');
+    const btn = document.getElementById('btn');
+    const msg = document.getElementById('msg');
+    const card = document.getElementById('card');
+    let room = null;
+
+    function say(text, cls) { msg.textContent = text; card.className = 'card ' + (cls || ''); }
+    function ended(text) {
+      say(text || 'Call ended. You can close this tab.');
+      btn.textContent = 'Connect'; btn.className = ''; btn.disabled = true;
+      document.querySelectorAll('audio').forEach(a => a.remove());
+      room = null;
+    }
+
+    async function connect() {
+      if (!sid) { ended('This link is missing its session. Click "Talk in browser" again.'); return; }
+      btn.disabled = true; say('Connecting...');
+      try {
+        const res = await fetch('/api/livekit/join', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sid }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          ended(err.detail || 'Could not start the call (' + res.status + ').');
+          return;
+        }
+        const { url, token } = await res.json();
+        room = new Room({ adaptiveStream: true, dynacast: true });
+        room.on(RoomEvent.TrackSubscribed, (track) => {
+          if (track.kind === Track.Kind.Audio) document.body.appendChild(track.attach());
+        });
+        room.on(RoomEvent.ParticipantConnected, () => say('Agent connected. Start talking.', 'live'));
+        room.on(RoomEvent.ParticipantDisconnected, () => { if (room) room.disconnect(); });
+        room.on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
+          const agent = speakers.some(p => p.identity === 'agent');
+          if (room) say(agent ? 'Agent is speaking...' : 'Listening...', agent ? 'speaking' : 'live');
+        });
+        room.on(RoomEvent.Disconnected, () => ended());
+        await room.connect(url, token);
+        await room.localParticipant.setMicrophoneEnabled(true);
+        say(room.remoteParticipants.size ? 'Agent connected. Start talking.' : 'Waiting for the agent...', 'live');
+        btn.textContent = 'Hang up'; btn.className = 'end'; btn.disabled = false;
+      } catch (e) {
+        console.error(e);
+        if (room) room.disconnect();
+        ended('Could not connect: ' + (e && e.message ? e.message : e));
+      }
+    }
+
+    btn.addEventListener('click', () => { if (room) room.disconnect(); else connect(); });
+  </script>
+</body>
+</html>

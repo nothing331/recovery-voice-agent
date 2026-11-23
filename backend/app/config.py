@@ -33,6 +33,15 @@ class Settings(BaseSettings):
     cloudflare_turn_key_id: str = ""
     cloudflare_turn_api_token: str = ""
     ice_servers: str = ""
+    # LiveKit Cloud: when all three are set, "Talk in browser" runs through a LiveKit room
+    # (works on hosts without inbound UDP). Otherwise the direct SmallWebRTC path is used.
+    livekit_url: str = ""
+    livekit_api_key: str = ""
+    livekit_api_secret: str = ""
+
+    @property
+    def livekit_enabled(self) -> bool:
+        return bool(self.livekit_url and self.livekit_api_key and self.livekit_api_secret)
 
     @field_validator("verified_numbers", mode="before")
     @classmethod

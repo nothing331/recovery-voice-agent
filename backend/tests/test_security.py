@@ -327,3 +327,51 @@ def test_cloudflare_turn_credentials_are_cached(monkeypatch):
     assert calls[0].headers["authorization"] == "Bearer tok" and "/keys/kid/" in str(calls[0].url)
     assert first[0] == {"urls": ["stun:stun.cloudflare.com:3478"]}
     assert first[1]["username"] == "cu"
+
+
+# ---- LiveKit browser calls ----
+
+@pytest.fixture
+def livekit(client, monkeypatch):
+    from app import livekit_call
+
+    started = []
+
+    async def fake_run(call_id, room):
+        started.append((call_id, room))
+
+    monkeypatch.setattr(livekit_call, "_run", fake_run)
+    monkeypatch.setattr(settings, "livekit_url", "wss://demo.livekit.cloud")
+    monkeypatch.setattr(settings, "livekit_api_key", "APIkey")
+    monkeypatch.setattr(settings, "livekit_api_secret", "s" * 32)
+    client.started = started
+    return client
+
+
+def test_browser_session_uses_talk_page_when_livekit_configured(livekit):
+    url = livekit.post("/api/browser-session", json={"customer_id": "c1"}).json()["url"]
+    assert "/talk/?sid=" in url
+    assert livekit.get("/talk/").status_code == 200
+
+
+def test_livekit_join_is_single_use_and_scoped_to_one_room(livekit):
+    import jwt
+
+    url = livekit.post("/api/browser-session", json={"customer_id": "c1"}).json()["url"]
+    sid = url.split("sid=")[1]
+    r = livekit.post("/api/livekit/join", json={"sid": sid})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["url"] == "wss://demo.livekit.cloud"
+    claims = jwt.decode(body["token"], "s" * 32, algorithms=["HS256"])
+    room = claims["video"]["room"]
+    assert claims["video"]["roomJoin"] is True and room.startswith("call-")
+    assert claims["sub"] != "agent"
+    assert livekit.post("/api/livekit/join", json={"sid": sid}).status_code == 403
+    assert livekit.post("/api/livekit/join", json={"sid": "bogus"}).status_code == 403
+
+
+def test_livekit_join_404_when_not_configured(client):
+    url = client.post("/api/browser-session", json={"customer_id": "c1"}).json()["url"]
+    assert "/client/?sid=" in url
+    assert client.post("/api/livekit/join", json={"sid": "x"}).status_code == 404

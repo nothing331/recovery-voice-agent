@@ -8,7 +8,7 @@ from starlette.responses import PlainTextResponse
 from starlette.staticfiles import StaticFiles
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from app import api, telephony
+from app import api, livekit_call, telephony
 from app.config import settings
 
 try:
@@ -83,6 +83,7 @@ app = FastAPI(title="Autopay Recovery Voice Agent")
 app.add_middleware(TunnelGuard)
 app.include_router(telephony.router)
 app.include_router(api.router)
+app.include_router(livekit_call.router)
 if PipecatPrebuiltUI is not None:
     app.mount("/client", PipecatPrebuiltUI)
 
@@ -91,6 +92,9 @@ if PipecatPrebuiltUI is not None:
 async def health():
     return {"ok": True}
 
+
+# "Talk in browser" page for the LiveKit path.
+app.mount("/talk", StaticFiles(directory=Path(__file__).parent / "static" / "talk", html=True), name="talk")
 
 # The built dashboard (frontend/dist), served last so API and Plivo routes win.
 FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"

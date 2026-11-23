@@ -181,7 +181,8 @@ async def browser_session(body: BrowserSession, request: Request):
     _check_callable(conn, body.customer_id, body.override_do_not_call)
     call_id = calls.create_call(conn, body.customer_id, "browser", "browser")
     token = store.new_browser_token(call_id)
-    return {"url": str(request.base_url).rstrip("/") + f"/client/?sid={token}"}
+    page = "/talk/" if settings.livekit_enabled else "/client/"  # LiveKit room vs direct WebRTC
+    return {"url": str(request.base_url).rstrip("/") + f"{page}?sid={token}"}
 
 
 _CALL_COLS = ("c.id, c.customer_id, cu.name AS customer_name, c.to_number, c.channel, c.status, "

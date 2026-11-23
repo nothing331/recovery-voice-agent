@@ -62,6 +62,13 @@ def start_browser_session(token: str | None) -> str | None:
     return sid
 
 
+def take_browser_token(token: str | None) -> int | None:
+    """Single-use: trade a talk-page token for its call id (the LiveKit path has no WebRTC session)."""
+    _purge()
+    entry = browser_tokens.pop(token, None) if token else None
+    return entry[0] if entry else None
+
+
 def get_browser_session(session_id: str) -> dict | None:
     _purge()
     return browser_sessions.get(session_id)
