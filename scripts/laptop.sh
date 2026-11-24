@@ -11,7 +11,7 @@ PORT=7860
 mkdir -p "$RUN"
 
 stop() {
-  pkill -f "cloudflared tunnel --no-autoupdate --url http://localhost:$PORT" 2>/dev/null
+  pkill -f "cloudflared tunnel --no-autoupdate" 2>/dev/null
   pkill -f "uvicorn app.main:app --port $PORT" 2>/dev/null
   echo "stopped"
 }
