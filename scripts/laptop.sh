@@ -28,7 +28,7 @@ start() {
       > "$RUN/app.log" 2>&1 &)
   for _ in $(seq 1 60); do curl -sf localhost:$PORT/health >/dev/null && break; sleep 0.5; done
   : > "$RUN/tunnel.log"
-  nohup cloudflared tunnel --no-autoupdate --url http://localhost:$PORT > "$RUN/tunnel.log" 2>&1 &
+  nohup cloudflared tunnel --no-autoupdate --protocol http2 --url http://localhost:$PORT > "$RUN/tunnel.log" 2>&1 &
   for _ in $(seq 1 90); do grep -q 'trycloudflare.com' "$RUN/tunnel.log" && break; sleep 1; done
   URL=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' "$RUN/tunnel.log" | head -1)
   echo "$URL" > "$RUN/url.txt"
